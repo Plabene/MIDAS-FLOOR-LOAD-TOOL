@@ -32,6 +32,9 @@ class FloorLoadAssignment:
     area: float
     status: str
     warnings: tuple[str, ...]
+    story_name: str = ""
+    source_id: str = ""
+    polygon_index: int = 0
 
     def to_record(self) -> dict:
         return {
@@ -62,24 +65,55 @@ def build_assignments_from_regions(
     *,
     regions: Iterable['LoadRegion'],
     story_nodes: Sequence[Node],
+    story_nodes_by_name: dict[str, Sequence[Node]] | None = None,
     snap_tolerance: float = 0.5,
     include_zero_load: bool = False,
 ) -> list[FloorLoadAssignment]:
     assignments: list[FloorLoadAssignment] = []
     for region in regions:
         warnings = list(region.warnings)
+        region_story = getattr(region.region, "story_name", "")
+        region_source_id = getattr(region.region, "source_id", "")
+        region_polygon_index = int(getattr(region.region, "polygon_index", 0) or 0)
         if region.load is None:
             assignments.append(
-                FloorLoadAssignment("", 0.0, 0.0, tuple(), region.region.layer, region.region.source_type, region.area, "LOAD_PARSE_FAILED", tuple(warnings))
+                FloorLoadAssignment(
+                    "",
+                    0.0,
+                    0.0,
+                    tuple(),
+                    region.region.layer,
+                    region.region.source_type,
+                    region.area,
+                    "LOAD_PARSE_FAILED",
+                    tuple(warnings),
+                    story_name=region_story,
+                    source_id=region_source_id,
+                    polygon_index=region_polygon_index,
+                )
             )
             continue
         if not include_zero_load and abs(region.load.dl) <= 1.0e-12 and abs(region.load.ll) <= 1.0e-12:
             warnings.append("DL/LL이 모두 0이므로 입력 제외되었습니다. 0 값도 명시 입력 옵션을 켜면 기록됩니다.")
             assignments.append(
-                FloorLoadAssignment(region.load.real_name, region.load.dl, region.load.ll, tuple(), region.region.layer, region.region.source_type, region.area, "ZERO_LOAD_SKIPPED", tuple(warnings))
+                FloorLoadAssignment(
+                    region.load.real_name,
+                    region.load.dl,
+                    region.load.ll,
+                    tuple(),
+                    region.region.layer,
+                    region.region.source_type,
+                    region.area,
+                    "ZERO_LOAD_SKIPPED",
+                    tuple(warnings),
+                    story_name=region_story,
+                    source_id=region_source_id,
+                    polygon_index=region_polygon_index,
+                )
             )
             continue
-        node_ids, max_error = _snap_polygon_vertices_to_nodes(region.region.vertices, story_nodes)
+        nodes_for_region = story_nodes_by_name.get(region_story, story_nodes) if story_nodes_by_name else story_nodes
+        node_ids, max_error = _snap_polygon_vertices_to_nodes(region.region.vertices, nodes_for_region)
         if len(node_ids) < 3:
             warnings.append("해치 경계에 대응되는 절점이 3개 미만입니다. Story 선택 또는 CAD 좌표계를 확인하세요.")
             status = "BOUNDARY_NODE_COUNT_TOO_LOW"
@@ -99,6 +133,9 @@ def build_assignments_from_regions(
                 area=region.area,
                 status=status,
                 warnings=tuple(warnings),
+                story_name=region_story,
+                source_id=region_source_id,
+                polygon_index=region_polygon_index,
             )
         )
     return assignments
@@ -162,6 +199,13 @@ def write_reports(
     rows = []
     for item in assignments:
         row = item.to_record()
+        row.update(
+            {
+                "DXF Story": item.story_name,
+                "DXF source_id": item.source_id,
+                "DXF polygon_index": item.polygon_index,
+            }
+        )
         row.update({"모델명": model_name, "Story명": story.name, "Story Elevation": story.elevation, "DXF 파일명": dxf_name})
         rows.append(row)
     df = pd.DataFrame(rows)
@@ -209,12 +253,14 @@ def run_mgt_build_pipeline(
     story_nodes: Sequence[Node],
     snap_tolerance: float,
     include_zero_load: bool,
+    story_nodes_by_name: dict[str, Sequence[Node]] | None = None,
     mode: str = "append",
     encoding: str = "cp949",
 ) -> BuildResult:
     assignments = build_assignments_from_regions(
         regions=regions,
         story_nodes=story_nodes,
+        story_nodes_by_name=story_nodes_by_name,
         snap_tolerance=snap_tolerance,
         include_zero_load=include_zero_load,
     )

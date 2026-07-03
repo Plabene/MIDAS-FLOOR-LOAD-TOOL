@@ -13,7 +13,7 @@
 7. 사용자 작성 DXF에서 `HATCH` 우선, closed `LWPOLYLINE/POLYLINE` fallback으로 하중 영역 인식
 8. 선택 Story 노드에 polygon vertex snap
 9. `*FLOADTYPE`, `*FLOORLOAD` 블록을 full MGT에 삽입
-10. `doc/NEW` → `doc/IMPORTMXT` → `doc/SAVEAS` 방식으로 새 `.mgb` 저장
+10. `doc/NEW` → `doc/IMPORTMXT` → `doc/SAVEAS` 방식으로 새 `.mgbx` 저장
 11. 결과 보고서 `.xlsx/.csv`, 검증 DXF, 날짜별 로그 생성
 
 원본 `.mgb`는 직접 덮어쓰지 않습니다.
@@ -174,7 +174,7 @@ LOAD_001_사무실_DL_1.2_LL_3
 ## 9. 결과 파일
 
 - `DATA/OUTPUT/{project_name}/mgt/*_floorload_full.mgt`
-- `DATA/OUTPUT/{project_name}/models/*_floorload_added.mgb`
+- `DATA/OUTPUT/{project_name}/models/*_floorload_added.mgbx`
 - `DATA/OUTPUT/{project_name}/reports/*_floorload_report.xlsx`
 - `DATA/OUTPUT/{project_name}/reports/*_floorload_report.csv`
 - `DATA/OUTPUT/{project_name}/reports/*_floorload_preview.dxf`

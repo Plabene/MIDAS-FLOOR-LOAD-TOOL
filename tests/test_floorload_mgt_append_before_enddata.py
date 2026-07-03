@@ -1,12 +1,12 @@
 from app.core.floorload_mgt_builder import FloorLoadAssignment, patch_full_mgt_text
 
 
-def _assignment(load_type_name: str = "RoofLoad") -> FloorLoadAssignment:
+def _assignment(load_type_name: str = "RoofLoad", node_ids: tuple[int, ...] = (126, 128, 129, 116)) -> FloorLoadAssignment:
     return FloorLoadAssignment(
         load_type_name=load_type_name,
         dl=8.6,
         ll=1.0,
-        node_ids=(126, 128, 129, 116),
+        node_ids=node_ids,
         source_layer="LOAD_001_RoofLoad_DL_8.6_LL_1",
         source_type="HATCH",
         area=28.77,
@@ -66,3 +66,22 @@ def test_auto_floorload_desc_and_group_are_blank():
     assert "LOAD_001_" not in record
     assert "DXF_AUTO" not in record
     assert "DXF_FLOORLOAD" not in record
+
+
+def test_same_load_type_multi_regions_create_multiple_floorload_records():
+    patched = patch_full_mgt_text(
+        "*ENDDATA",
+        assignments=[
+            _assignment(node_ids=(1, 2, 3, 4)),
+            _assignment(node_ids=(11, 12, 13, 14)),
+        ],
+    )
+
+    records = [line for line in patched.splitlines() if line.startswith("   RoofLoad, 2")]
+    assert len(records) == 2
+    assert "   RoofLoad, 2, 0, 0, 0, 0, GZ, NO, , NO, YES, , 1, 2, 3, 4" in records
+    assert "   RoofLoad, 2, 0, 0, 0, 0, GZ, NO, , NO, YES, , 11, 12, 13, 14" in records
+    assert patched.count("   RoofLoad,") == 3
+    assert "LOAD_001_" not in patched
+    assert "DXF_AUTO layer=" not in patched
+    assert "DXF_FLOORLOAD" not in patched

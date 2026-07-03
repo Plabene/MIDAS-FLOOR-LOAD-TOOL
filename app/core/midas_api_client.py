@@ -154,6 +154,8 @@ class MidasGenApiClient:
 
     def save_as_project(self, target_path: str | Path) -> Path:
         path = Path(target_path).expanduser().resolve()
+        if path.suffix.lower() != ".mgbx":
+            path = path.with_suffix(".mgbx")
         path.parent.mkdir(parents=True, exist_ok=True)
         self.post(self.SAVEAS_ENDPOINT, {"Argument": str(path)})
         return path

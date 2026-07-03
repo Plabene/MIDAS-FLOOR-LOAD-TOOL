@@ -8,8 +8,18 @@ from typing import Iterable, Sequence
 import ezdxf
 from shapely.geometry import MultiPolygon, Polygon
 from shapely.geometry.polygon import orient
+from .dxf_story_layout import choose_story_layout_for_polygon, read_layout_metadata, transform_polygon
 
 Point2D = tuple[float, float]
+
+_TEMPLATE_REFERENCE_LAYERS = {
+    "CENTERLINE_COLUMN",
+    "CENTERLINE_BEAM",
+    "CENTERLINE_WALL",
+    "REFERENCE_GRID",
+    "FLOAD_GUIDE",
+    "STORY_LABEL",
+}
 
 
 @dataclass
@@ -22,6 +32,10 @@ class HatchRegion:
     area: float
     bbox: tuple[float, float, float, float]
     warnings: list[str] = field(default_factory=list)
+    story_name: str = ""
+    source_id: str = ""
+    polygon_index: int = 0
+    hatch_index: int = 0
 
     def to_record(self) -> dict:
         return {
@@ -32,6 +46,10 @@ class HatchRegion:
             "bbox": self.bbox,
             "vertex_count": len(self.vertices),
             "warnings": list(self.warnings),
+            "story_name": self.story_name,
+            "source_id": self.source_id,
+            "polygon_index": self.polygon_index,
+            "hatch_index": self.hatch_index,
         }
 
 
@@ -45,13 +63,15 @@ def read_dxf_hatches(
     doc = ezdxf.readfile(str(dxf_path))
     regions: list[HatchRegion] = []
 
+    hatch_index = 0
     for entity in doc.modelspace():
         dxftype = entity.dxftype()
         if dxftype == "HATCH":
-            region = _region_from_hatch(entity, tessellation_segments, min_area)
-            if region is not None:
-                regions.append(region)
+            hatch_index += 1
+            regions.extend(_regions_from_hatch(entity, tessellation_segments, min_area, hatch_index))
         elif include_closed_polylines and dxftype in {"LWPOLYLINE", "POLYLINE"}:
+            if str(entity.dxf.layer).upper() in _TEMPLATE_REFERENCE_LAYERS:
+                continue
             region = _region_from_closed_polyline(entity, tessellation_segments, min_area)
             if region is not None:
                 regions.append(region)
@@ -59,7 +79,7 @@ def read_dxf_hatches(
     return regions
 
 
-def _region_from_hatch(entity, tessellation_segments: int, min_area: float) -> HatchRegion | None:
+def _regions_from_hatch(entity, tessellation_segments: int, min_area: float, hatch_index: int = 0) -> list[HatchRegion]:
     rings: list[list[Point2D]] = []
     warnings: list[str] = []
 
@@ -74,21 +94,30 @@ def _region_from_hatch(entity, tessellation_segments: int, min_area: float) -> H
             continue
         rings.append(_close_ring(vertices))
 
-    polygon = _polygon_from_rings(rings, min_area)
-    if polygon is None:
-        return None
+    polygons = _polygons_from_rings(rings, min_area)
+    if not polygons:
+        return []
 
-    exterior = list(polygon.exterior.coords)[:-1]
-    return HatchRegion(
-        source_type="HATCH",
-        layer=str(entity.dxf.layer),
-        handle=str(entity.dxf.handle),
-        vertices=[(float(x), float(y)) for x, y in exterior],
-        polygon=polygon,
-        area=float(polygon.area),
-        bbox=tuple(float(v) for v in polygon.bounds),
-        warnings=warnings,
-    )
+    regions: list[HatchRegion] = []
+    handle = str(entity.dxf.handle)
+    for polygon_index, polygon in enumerate(polygons, start=1):
+        exterior = list(polygon.exterior.coords)[:-1]
+        regions.append(
+            HatchRegion(
+                source_type="HATCH",
+                layer=str(entity.dxf.layer),
+                handle=handle,
+                vertices=[(float(x), float(y)) for x, y in exterior],
+                polygon=polygon,
+                area=float(polygon.area),
+                bbox=tuple(float(v) for v in polygon.bounds),
+                warnings=list(warnings),
+                source_id=f"{handle}:{polygon_index}",
+                polygon_index=polygon_index,
+                hatch_index=hatch_index,
+            )
+        )
+    return regions
 
 
 def _region_from_closed_polyline(entity, tessellation_segments: int, min_area: float) -> HatchRegion | None:
@@ -106,9 +135,10 @@ def _region_from_closed_polyline(entity, tessellation_segments: int, min_area: f
     else:
         vertices = [(float(v.dxf.location.x), float(v.dxf.location.y)) for v in entity.vertices]
 
-    polygon = _polygon_from_rings([_close_ring(vertices)], min_area)
-    if polygon is None:
+    polygons = _polygons_from_rings([_close_ring(vertices)], min_area)
+    if not polygons:
         return None
+    polygon = polygons[0]
 
     return HatchRegion(
         source_type=entity.dxftype(),
@@ -258,22 +288,66 @@ def _bulge_arc_points(start: Point2D, end: Point2D, bulge: float, tessellation_s
 
 
 def _polygon_from_rings(rings: Iterable[Sequence[Point2D]], min_area: float) -> Polygon | None:
+    polygons = _polygons_from_rings(rings, min_area)
+    return polygons[0] if polygons else None
+
+
+def _polygons_from_rings(rings: Iterable[Sequence[Point2D]], min_area: float) -> list[Polygon]:
     clean_rings = [_close_ring(_dedupe_consecutive(list(ring))) for ring in rings if len(ring) >= 3]
     clean_rings = [ring for ring in clean_rings if len(ring) >= 4]
     if not clean_rings:
-        return None
+        return []
 
-    clean_rings.sort(key=lambda ring: abs(Polygon(ring).area), reverse=True)
-    exterior = clean_rings[0]
-    holes = [ring for ring in clean_rings[1:] if abs(Polygon(ring).area) > min_area]
-    polygon = Polygon(exterior, holes)
-    if not polygon.is_valid:
-        polygon = polygon.buffer(0)
-    if isinstance(polygon, MultiPolygon):
-        polygon = max(polygon.geoms, key=lambda geom: geom.area)
-    if polygon.is_empty or polygon.area <= min_area:
-        return None
-    return orient(polygon, sign=1.0)
+    candidates = []
+    for ring in clean_rings:
+        poly = Polygon(ring)
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        if poly.is_empty or abs(poly.area) <= min_area:
+            continue
+        if isinstance(poly, MultiPolygon):
+            poly = max(poly.geoms, key=lambda geom: geom.area)
+        candidates.append({"ring": ring, "poly": poly, "area": abs(poly.area)})
+    candidates.sort(key=lambda row: row["area"], reverse=True)
+    if not candidates:
+        return []
+
+    exteriors = []
+    for idx, row in enumerate(candidates):
+        point = row["poly"].representative_point()
+        containing = [other for j, other in enumerate(candidates) if j != idx and other["area"] > row["area"] and other["poly"].contains(point)]
+        if not containing:
+            exteriors.append(row)
+
+    polygons: list[Polygon] = []
+    for exterior in exteriors:
+        exterior_poly = exterior["poly"]
+        holes = []
+        for candidate in candidates:
+            if candidate is exterior:
+                continue
+            point = candidate["poly"].representative_point()
+            if not exterior_poly.contains(point):
+                continue
+            smaller_container = any(
+                other is not exterior
+                and other is not candidate
+                and other["area"] < exterior["area"]
+                and other["area"] > candidate["area"]
+                and other["poly"].contains(point)
+                for other in candidates
+            )
+            if not smaller_container:
+                holes.append(candidate["ring"])
+        polygon = Polygon(exterior["ring"], holes)
+        if not polygon.is_valid:
+            polygon = polygon.buffer(0)
+        if isinstance(polygon, MultiPolygon):
+            parts = [part for part in polygon.geoms if part.area > min_area]
+            polygons.extend(orient(part, sign=1.0) for part in parts)
+        elif not polygon.is_empty and polygon.area > min_area:
+            polygons.append(orient(polygon, sign=1.0))
+    return polygons
 
 
 def _xy(point) -> Point2D:
@@ -333,6 +407,9 @@ class LoadRegion:
                 "load_real_name": self.load.real_name if self.load else "",
                 "DL": self.load.dl if self.load else None,
                 "LL": self.load.ll if self.load else None,
+                "story_name": self.region.story_name,
+                "source_id": self.region.source_id,
+                "polygon_index": self.region.polygon_index,
                 "warnings": list(self.warnings),
             }
         )
@@ -348,6 +425,7 @@ def read_load_regions(
     min_area: float = 1.0e-9,
 ) -> list[LoadRegion]:
     mapping = _load_layer_mapping(mapping_path)
+    story_layouts = read_layout_metadata(Path(dxf_path).with_suffix(".layout_metadata.json"))
     raw_regions = read_dxf_hatches(
         dxf_path,
         include_closed_polylines=include_closed_polylines,
@@ -356,6 +434,8 @@ def read_load_regions(
     )
     regions: list[LoadRegion] = []
     for region in raw_regions:
+        if story_layouts:
+            region = _region_with_story_layout(region, story_layouts)
         warnings = list(region.warnings)
         warnings.extend(validate_polygon(region.polygon, min_area=min_area))
         try:
@@ -377,6 +457,44 @@ def read_load_regions(
             warnings.append(str(exc))
         regions.append(LoadRegion(region=region, load=load, status=status, warnings=warnings))
     return regions
+
+
+def _region_with_story_layout(region: HatchRegion, story_layouts) -> HatchRegion:
+    layout, warning = choose_story_layout_for_polygon(region.polygon, story_layouts)
+    warnings = list(region.warnings)
+    if warning:
+        warnings.append(warning)
+    if layout is None:
+        return HatchRegion(
+            source_type=region.source_type,
+            layer=region.layer,
+            handle=region.handle,
+            vertices=region.vertices,
+            polygon=region.polygon,
+            area=region.area,
+            bbox=region.bbox,
+            warnings=warnings,
+            story_name=region.story_name,
+            source_id=region.source_id,
+            polygon_index=region.polygon_index,
+            hatch_index=region.hatch_index,
+        )
+    polygon = transform_polygon(region.polygon, layout.inverse_transform)
+    exterior = [(float(x), float(y)) for x, y in list(polygon.exterior.coords)[:-1]]
+    return HatchRegion(
+        source_type=region.source_type,
+        layer=region.layer,
+        handle=region.handle,
+        vertices=exterior,
+        polygon=polygon,
+        area=float(polygon.area),
+        bbox=tuple(float(v) for v in polygon.bounds),
+        warnings=warnings,
+        story_name=layout.story_name,
+        source_id=region.source_id,
+        polygon_index=region.polygon_index,
+        hatch_index=region.hatch_index,
+    )
 
 
 def _load_layer_mapping(path: str | Path | None) -> dict[str, dict[str, _Any]]:

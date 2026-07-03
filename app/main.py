@@ -13,7 +13,7 @@ from tkinter import filedialog, messagebox, ttk
 try:
     # package 실행: python -m app.main
     from .core.dxf_load_reader import read_load_regions
-    from .core.dxf_template_writer import LoadLayerSpec, write_story_centerline_dxf
+    from .core.dxf_template_writer import LoadLayerSpec, write_all_story_centerline_dxf, write_story_centerline_dxf
     from .core.floorload_mgt_builder import run_mgt_build_pipeline
     from .core.load_selection import apply_load_display_names
     from .core.pdf_load_importer import (
@@ -47,7 +47,7 @@ except ImportError:  # 직접 실행: python app/main.py
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
     from app.core.dxf_load_reader import read_load_regions
-    from app.core.dxf_template_writer import LoadLayerSpec, write_story_centerline_dxf
+    from app.core.dxf_template_writer import LoadLayerSpec, write_all_story_centerline_dxf, write_story_centerline_dxf
     from app.core.floorload_mgt_builder import run_mgt_build_pipeline
     from app.core.load_selection import apply_load_display_names
     from app.core.pdf_load_importer import (
@@ -76,6 +76,17 @@ except ImportError:  # 직접 실행: python app/main.py
         safe_filename,
         unique_output_path,
     )
+
+
+def _mgbx_path(path: str | Path) -> Path:
+    target = Path(path)
+    if target.suffix.lower() != ".mgbx":
+        target = target.with_suffix(".mgbx")
+    return target
+
+
+ALL_STORIES_VALUE = "__ALL_STORIES__"
+ALL_STORIES_LABEL = "전층"
 
 
 class FloorLoadAutoApp(tk.Tk):
@@ -403,13 +414,17 @@ class FloorLoadAutoApp(tk.Tk):
         ttk.Entry(f, textvariable=self.user_dxf_path).grid(row=5, column=1, sticky="ew", padx=8, pady=8)
         ttk.Button(f, text="찾기", command=self.select_user_dxf).grid(row=5, column=2, padx=8, pady=8)
         ttk.Button(f, text="DXF 검증", command=self.validate_user_dxf).grid(row=6, column=0, sticky="w", padx=8, pady=8)
-        self.dxf_tree = ttk.Treeview(f, columns=("status", "source", "layer", "load", "dl", "ll", "area", "warnings"), show="headings", height=12)
+        self.dxf_tree = ttk.Treeview(f, columns=("status", "story", "source", "layer", "load", "dl", "ll", "area", "source_id", "warnings"), show="headings", height=12)
         for col, txt, width in (
             ("status", "상태", 120), ("source", "객체", 80), ("layer", "레이어", 220), ("load", "하중명", 140),
             ("dl", "DL", 80), ("ll", "LL", 80), ("area", "면적", 100), ("warnings", "경고", 300),
         ):
             self.dxf_tree.heading(col, text=txt)
             self.dxf_tree.column(col, width=width)
+        self.dxf_tree.heading("story", text="Story")
+        self.dxf_tree.column("story", width=90)
+        self.dxf_tree.heading("source_id", text="source_id")
+        self.dxf_tree.column("source_id", width=110)
         self.dxf_tree.grid(row=7, column=0, columnspan=3, sticky="nsew", padx=8, pady=8)
         f.rowconfigure(2, weight=2)
         f.rowconfigure(7, weight=1)
@@ -458,7 +473,7 @@ class FloorLoadAutoApp(tk.Tk):
         ttk.Entry(f, textvariable=self.snap_tol_var, width=12).grid(row=0, column=1, sticky="w", padx=8, pady=8)
         self.include_zero_var = tk.BooleanVar(value=self.config_data.include_zero_load)
         ttk.Checkbutton(f, text="0 값도 명시 입력", variable=self.include_zero_var).grid(row=1, column=1, sticky="w", padx=8, pady=8)
-        ttk.Label(f, text="결과 .mgb 저장 경로").grid(row=2, column=0, sticky="w", padx=8, pady=8)
+        ttk.Label(f, text="결과 .mgbx 저장 경로").grid(row=2, column=0, sticky="w", padx=8, pady=8)
         ttk.Entry(f, textvariable=self.target_model_path).grid(row=2, column=1, sticky="ew", padx=8, pady=8)
         ttk.Button(f, text="저장 위치", command=self.select_target_model).grid(row=2, column=2, padx=8, pady=8)
         ttk.Button(f, text="full MGT 생성 + 새 모델 import/save as", command=self.build_and_import).grid(row=3, column=1, sticky="w", padx=8, pady=12)
@@ -499,7 +514,7 @@ class FloorLoadAutoApp(tk.Tk):
         if path:
             self.model_path.set(path)
             self._ensure_current_project_workspace(Path(path).stem)
-            default = self.current_project_subdirs["models"] / f"{Path(path).stem}_floorload_added.mgb"
+            default = self.current_project_subdirs["models"] / f"{Path(path).stem}_floorload_added.mgbx"
             self.target_model_path.set(str(default))
 
     def select_mgt_file(self) -> None:
@@ -637,9 +652,12 @@ class FloorLoadAutoApp(tk.Tk):
             self.mapping_path.set(path)
 
     def select_target_model(self) -> None:
-        path = filedialog.asksaveasfilename(defaultextension=".mgb", filetypes=[("MIDAS model", "*.mgb"), ("All files", "*.*")])
+        path = filedialog.asksaveasfilename(
+            defaultextension=".mgbx",
+            filetypes=[("MIDAS Gen NX Binary", "*.mgbx"), ("MIDAS Gen Binary", "*.mgb"), ("All files", "*.*")],
+        )
         if path:
-            self.target_model_path.set(path)
+            self.target_model_path.set(str(_mgbx_path(path)))
 
     def open_model_and_export(self) -> None:
         model = self.model_path.get().strip()
@@ -692,8 +710,8 @@ class FloorLoadAutoApp(tk.Tk):
             self.log(f"Story 선택: {values[0]}")
 
     def create_dxf_template(self) -> None:
-        story = self._selected_story()
-        if not story:
+        story_mode, story = self._selected_dxf_story_mode()
+        if story_mode != ALL_STORIES_VALUE and not story:
             messagebox.showwarning("Story 선택", "Story를 먼저 선택해 주세요.")
             return
         if not self.nodes or not self.elements:
@@ -726,16 +744,27 @@ class FloorLoadAutoApp(tk.Tk):
                     f"출력 폴더: {out_dir}"
                 ) from exc
 
-            base_out = out_dir / f"{safe_filename(model_name)}_{safe_filename(story.name)}_floorload_template.dxf"
+            story_part = "ALL_STORIES" if story_mode == ALL_STORIES_VALUE else story.name
+            base_out = out_dir / f"{safe_filename(model_name)}_{safe_filename(story_part)}_floorload_template.dxf"
             out = unique_output_path(base_out)
-            result = write_story_centerline_dxf(
-                output_path=out,
-                story=story,
-                nodes=self.nodes,
-                elements=self.elements,
-                load_layers=specs,
-                story_tolerance=float(self.story_tol_var.get()),
-            )
+            if story_mode == ALL_STORIES_VALUE:
+                result = write_all_story_centerline_dxf(
+                    output_path=out,
+                    stories=self.stories,
+                    nodes=self.nodes,
+                    elements=self.elements,
+                    load_layers=specs,
+                    story_tolerance=float(self.story_tol_var.get()),
+                )
+            else:
+                result = write_story_centerline_dxf(
+                    output_path=out,
+                    story=story,
+                    nodes=self.nodes,
+                    elements=self.elements,
+                    load_layers=specs,
+                    story_tolerance=float(self.story_tol_var.get()),
+                )
             return result
 
         self.run_worker("DXF 템플릿 생성", job)
@@ -764,7 +793,9 @@ class FloorLoadAutoApp(tk.Tk):
         self._build_pipeline(import_to_midas=True)
 
     def _build_pipeline(self, *, import_to_midas: bool) -> None:
-        story = self._selected_story()
+        story_mode, story = self._selected_dxf_story_mode()
+        if story_mode == ALL_STORIES_VALUE:
+            story = Story("ALL_STORIES", 0.0)
         if not story:
             messagebox.showwarning("Story 선택", "Story를 먼저 선택해 주세요.")
             return
@@ -780,7 +811,15 @@ class FloorLoadAutoApp(tk.Tk):
         def job():
             self._ensure_current_project_workspace()
             regions = self.loaded_regions or read_load_regions(dxf, mapping_path=self.mapping_path.get().strip() or None)
-            story_nodes = select_nodes_by_story(self.nodes, story.elevation, float(self.story_tol_var.get()))
+            story_nodes_by_name = None
+            if any(getattr(region.region, "story_name", "") for region in regions):
+                story_nodes_by_name = {
+                    item.name: select_nodes_by_story(self.nodes, item.elevation, float(self.story_tol_var.get()))
+                    for item in self.stories
+                }
+                story_nodes = list(self.nodes)
+            else:
+                story_nodes = select_nodes_by_story(self.nodes, story.elevation, float(self.story_tol_var.get()))
             if not story_nodes:
                 raise RuntimeError("선택 Story Level의 노드가 없습니다. Story tolerance 또는 선택 Story를 확인해 주세요.")
             model_stem = Path(self.model_path.get() or mgt).stem
@@ -801,15 +840,18 @@ class FloorLoadAutoApp(tk.Tk):
                 story_nodes=story_nodes,
                 snap_tolerance=float(self.snap_tol_var.get()),
                 include_zero_load=bool(self.include_zero_var.get()),
+                story_nodes_by_name=story_nodes_by_name,
                 mode="append",
             )
             if import_to_midas:
                 target = self.target_model_path.get().strip()
                 if not target:
-                    target = str(model_dir / f"{safe_filename(model_stem)}_{safe_filename(story.name)}_floorload_added.mgb")
-                    self.target_model_path.set(target)
+                    target = str(model_dir / f"{safe_filename(model_stem)}_{safe_filename(story.name)}_floorload_added.mgbx")
+                else:
+                    target = str(_mgbx_path(target))
+                self.target_model_path.set(target)
                 if not target:
-                    raise RuntimeError("결과 .mgb 저장 경로가 비어 있습니다.")
+                    raise RuntimeError("결과 .mgbx 저장 경로가 비어 있습니다.")
                 client = self._client()
                 client.new_project()
                 client.import_mgt(result.full_mgt_path)
@@ -1027,6 +1069,8 @@ class FloorLoadAutoApp(tk.Tk):
         self.mapping_path.set(str(result.mapping_json_path))
         if hasattr(self, "open_generated_dxf_button"):
             self.open_generated_dxf_button.state(["!disabled"])
+        if getattr(result, "layout_metadata_path", None):
+            self.log(f"DXF layout metadata: {result.layout_metadata_path}")
         messagebox.showinfo(
             "DXF 템플릿 생성 완료",
             (
@@ -1034,6 +1078,7 @@ class FloorLoadAutoApp(tk.Tk):
                 f"생성 파일:\n{result.dxf_path}\n\n"
                 "CAD에서 파일을 열어 하중 영역을 HATCH 또는 폐합 Polyline으로 입력한 뒤 저장해 주세요."
             ),
+            detail=(f"layout metadata: {result.layout_metadata_path}" if getattr(result, "layout_metadata_path", None) else ""),
         )
 
     def _open_path_with_default_app(self, path: Path) -> None:
@@ -1062,6 +1107,12 @@ class FloorLoadAutoApp(tk.Tk):
             if story.name == name:
                 return story
         return self.stories[0] if self.stories else None
+
+    def _selected_dxf_story_mode(self) -> tuple[str, Story | None]:
+        selected = self.selected_story_name.get()
+        if selected in {ALL_STORIES_LABEL, ALL_STORIES_VALUE}:
+            return ALL_STORIES_VALUE, None
+        return "SINGLE", self._selected_story()
 
     def _load_layer_specs(self) -> list[LoadLayerSpec]:
         self._sync_final_load_list()
@@ -1145,8 +1196,9 @@ class FloorLoadAutoApp(tk.Tk):
             self.selected_story_name.set(stories[0].name)
         if hasattr(self, "dxf_story_combo"):
             story_names = [story.name for story in stories]
-            self.dxf_story_combo.configure(values=story_names)
-            if story_names and self.selected_story_name.get() not in story_names:
+            display_values = [ALL_STORIES_LABEL] + story_names if story_names else []
+            self.dxf_story_combo.configure(values=display_values)
+            if story_names and self.selected_story_name.get() not in display_values:
                 self.selected_story_name.set(story_names[0])
             if not story_names:
                 self.dxf_story_combo.configure(values=[])
@@ -1155,6 +1207,12 @@ class FloorLoadAutoApp(tk.Tk):
     def _on_dxf_story_combo_selected(self, _event=None) -> None:
         selected = self.selected_story_name.get()
         if not selected or not hasattr(self, "story_tree"):
+            return
+        if selected in {ALL_STORIES_LABEL, ALL_STORIES_VALUE}:
+            try:
+                self.story_tree.selection_remove(self.story_tree.selection())
+            except Exception:
+                pass
             return
         try:
             for item_id in self.story_tree.get_children():
@@ -1176,12 +1234,14 @@ class FloorLoadAutoApp(tk.Tk):
                 "end",
                 values=(
                     region.status,
+                    region.region.story_name,
                     region.region.source_type,
                     region.region.layer,
                     load.real_name if load else "",
                     "" if not load else f"{load.dl:.2f}",
                     "" if not load else f"{load.ll:.2f}",
                     f"{region.area:.6g}",
+                    region.region.source_id,
                     " | ".join(region.warnings),
                 ),
             )
