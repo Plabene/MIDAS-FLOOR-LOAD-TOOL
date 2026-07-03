@@ -42,12 +42,14 @@ midas_floorload_auto_v4/
     src/
     config/
   DATA/
-    dxf_templates/
-    imported_dxf/
-    mgt/
-    models/
-    reports/
-    pdf_jobs/
+    OUTPUT/
+      {project_name}/
+        dxf_templates/
+        imported_dxf/
+        mgt/
+        models/
+        reports/
+        pdf_jobs/
   logs/
   build/
     build_exe.bat
@@ -128,7 +130,7 @@ GUI의 `1 API 설정` 탭에서 다음을 입력합니다.
 ```
 
 3. `선택 Story center line DXF 생성` 클릭
-4. `DATA/dxf_templates/`에 DXF와 `.layer_mapping.json/.csv` 자동 생성
+4. `DATA/OUTPUT/{project_name}/dxf_templates/`에 DXF와 `.layer_mapping.json/.csv` 자동 생성
 
 ### 6.3 CAD 작업 규칙
 
@@ -171,11 +173,11 @@ LOAD_001_사무실_DL_1.2_LL_3
 
 ## 9. 결과 파일
 
-- `DATA/mgt/*_floorload_full.mgt`
-- `DATA/models/*_floorload_added.mgb`
-- `DATA/reports/*_floorload_report.xlsx`
-- `DATA/reports/*_floorload_report.csv`
-- `DATA/reports/*_floorload_preview.dxf`
+- `DATA/OUTPUT/{project_name}/mgt/*_floorload_full.mgt`
+- `DATA/OUTPUT/{project_name}/models/*_floorload_added.mgb`
+- `DATA/OUTPUT/{project_name}/reports/*_floorload_report.xlsx`
+- `DATA/OUTPUT/{project_name}/reports/*_floorload_report.csv`
+- `DATA/OUTPUT/{project_name}/reports/*_floorload_preview.dxf`
 - `logs/floorload_YYYYMMDD.log`
 
 ## 10. 오류 해결
@@ -259,7 +261,7 @@ V4.1에서는 V3에 있던 `구조계산서 PDF → 설계하중표 인식 → M
 - 기존 모델에 `*FLOORLOAD`가 있으면 기존 하중을 유지하는 것을 기본 흐름으로 둡니다.
 - PDF 기능을 열어도 원본 `.mgb`는 직접 덮어쓰지 않습니다.
 - `PDF MGTX를 현재 MGT에 병합`할 때 기존 `STLDCASE` 또는 `FLOADTYPE` 이름이 있으면 기본적으로 skip합니다.
-- 병합 결과는 `DATA/mgt/` 아래 새 MGT 파일로 생성됩니다.
+- 병합 결과는 `DATA/OUTPUT/{project_name}/mgt/` 아래 새 MGT 파일로 생성됩니다.
 - 병합된 MGT를 사용하면 이후 DXF 기반 `*FLOORLOAD` 배정 생성 단계에서 PDF에서 추출된 하중 타입명과 연계할 수 있습니다.
 
 ### PDF 기능 관련 산출물
@@ -267,7 +269,7 @@ V4.1에서는 V3에 있던 `구조계산서 PDF → 설계하중표 인식 → M
 PDF 분석 실행 시 다음 폴더가 생성됩니다.
 
 ```text
-DATA/pdf_jobs/{모델명}_pdf_load/
+DATA/OUTPUT/{project_name}/pdf_jobs/{model_name}_pdf_load/
   source_pdfs/            # 사용자가 선택한 PDF 복사본
   midas_auto_define_floor_load_type.mgtx
   auto_input_log.xlsx

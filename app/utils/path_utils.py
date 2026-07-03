@@ -49,3 +49,38 @@ def unique_output_path(path: Path) -> Path:
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return parent / f"{stem}_{timestamp}{suffix}"
+
+
+def output_root_dir(data_root: Path) -> Path:
+    out = Path(data_root) / "OUTPUT"
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def project_output_dir(data_root: Path, project_name: str | None = None) -> Path:
+    raw_name = (project_name or "").strip()
+    if not raw_name:
+        raw_name = "untitled_project_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    safe_name = safe_filename(raw_name)
+    if not safe_name:
+        safe_name = "untitled_project_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    out = output_root_dir(data_root) / safe_name
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def ensure_project_output_subdirs(project_dir: Path) -> dict[str, Path]:
+    project_dir = Path(project_dir)
+    subdirs = {
+        "dxf_templates": project_dir / "dxf_templates",
+        "imported_dxf": project_dir / "imported_dxf",
+        "mgt": project_dir / "mgt",
+        "models": project_dir / "models",
+        "reports": project_dir / "reports",
+        "pdf_jobs": project_dir / "pdf_jobs",
+    }
+    for path in subdirs.values():
+        path.mkdir(parents=True, exist_ok=True)
+    return subdirs

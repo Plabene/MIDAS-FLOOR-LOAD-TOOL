@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from pathlib import Path
 import queue
 import subprocess
@@ -33,7 +34,14 @@ try:
     from .core.load_parser import parse_load_layer
     from .utils.config import AppConfig, load_config, save_config
     from .utils.logger import setup_logger
-    from .utils.path_utils import project_root, safe_filename, unique_output_path
+    from .utils.path_utils import (
+        ensure_project_output_subdirs,
+        output_root_dir,
+        project_output_dir,
+        project_root,
+        safe_filename,
+        unique_output_path,
+    )
 except ImportError:  # 직접 실행: python app/main.py
     ROOT = Path(__file__).resolve().parents[1]
     if str(ROOT) not in sys.path:
@@ -60,7 +68,14 @@ except ImportError:  # 직접 실행: python app/main.py
     from app.core.load_parser import parse_load_layer
     from app.utils.config import AppConfig, load_config, save_config
     from app.utils.logger import setup_logger
-    from app.utils.path_utils import project_root, safe_filename, unique_output_path
+    from app.utils.path_utils import (
+        ensure_project_output_subdirs,
+        output_root_dir,
+        project_output_dir,
+        project_root,
+        safe_filename,
+        unique_output_path,
+    )
 
 
 class FloorLoadAutoApp(tk.Tk):
@@ -73,6 +88,10 @@ class FloorLoadAutoApp(tk.Tk):
         self.config_data = load_config()
         self.root_dir = project_root()
         self.data_dir = self.root_dir / "DATA"
+        self.data_root = self.data_dir
+        self.output_root = output_root_dir(self.data_root)
+        self.current_project_dir: Path | None = None
+        self.current_project_subdirs: dict[str, Path] = {}
         self._ensure_data_dirs()
         self.queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.notebook: ttk.Notebook | None = None
@@ -106,8 +125,59 @@ class FloorLoadAutoApp(tk.Tk):
         self._poll_queue()
 
     def _ensure_data_dirs(self) -> None:
-        for name in ("dxf_templates", "imported_dxf", "mgt", "models", "reports", "pdf_jobs"):
-            (self.data_dir / name).mkdir(parents=True, exist_ok=True)
+        self.data_root.mkdir(parents=True, exist_ok=True)
+        self.output_root = output_root_dir(self.data_root)
+
+    def _guess_project_name(self) -> str:
+        candidates = []
+
+        for attr in ("model_path", "exported_mgt_path", "mgt_path", "selected_mgt_path"):
+            var = getattr(self, attr, None)
+            try:
+                value = var.get() if hasattr(var, "get") else str(var or "")
+            except Exception:
+                value = ""
+            if value:
+                candidates.append(value)
+
+        for attr in ("selected_pdf_paths", "pdf_files", "pdf_paths"):
+            pdf_files = getattr(self, attr, None)
+            if pdf_files:
+                try:
+                    candidates.append(str(pdf_files[0]))
+                    break
+                except Exception:
+                    pass
+
+        for value in candidates:
+            try:
+                stem = Path(value).stem
+                if stem:
+                    return stem
+            except Exception:
+                continue
+
+        return "untitled_project_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    def _ensure_current_project_workspace(self, project_name: str | None = None) -> Path:
+        if project_name is None and self.current_project_dir:
+            self.current_project_subdirs = ensure_project_output_subdirs(self.current_project_dir)
+            return self.current_project_dir
+
+        if project_name is None:
+            project_name = self._guess_project_name()
+
+        project_dir = project_output_dir(self.data_root, project_name)
+        self.current_project_dir = project_dir
+        self.current_project_subdirs = ensure_project_output_subdirs(project_dir)
+
+        if hasattr(self, "project_data_dir_var"):
+            try:
+                self.project_data_dir_var.set(str(project_dir))
+            except Exception:
+                pass
+
+        return project_dir
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
@@ -428,13 +498,15 @@ class FloorLoadAutoApp(tk.Tk):
         path = filedialog.askopenfilename(filetypes=[("MIDAS model", "*.mgb *.mgbx *.mcb"), ("All files", "*.*")])
         if path:
             self.model_path.set(path)
-            default = self.data_dir / "models" / f"{Path(path).stem}_floorload_added.mgb"
+            self._ensure_current_project_workspace(Path(path).stem)
+            default = self.current_project_subdirs["models"] / f"{Path(path).stem}_floorload_added.mgb"
             self.target_model_path.set(str(default))
 
     def select_mgt_file(self) -> None:
         path = filedialog.askopenfilename(filetypes=[("MIDAS text", "*.mgt *.mgtx *.mct"), ("All files", "*.*")])
         if path:
             self.exported_mgt_path.set(path)
+            self._ensure_current_project_workspace(Path(path).stem)
 
     def select_pdf_files(self) -> None:
         paths = filedialog.askopenfilenames(filetypes=[("PDF", "*.pdf"), ("All files", "*.*")])
@@ -444,6 +516,8 @@ class FloorLoadAutoApp(tk.Tk):
             p = Path(path)
             if p not in self.selected_pdf_paths:
                 self.selected_pdf_paths.append(p)
+        if not self.current_project_dir:
+            self._ensure_current_project_workspace()
         self._refresh_pdf_listbox()
 
     def clear_pdf_files(self) -> None:
@@ -483,12 +557,19 @@ class FloorLoadAutoApp(tk.Tk):
             return
 
         def job():
-            model_stem = safe_filename(Path(self.model_path.get() or self.exported_mgt_path.get() or "model").stem)
-            result = run_pdf_load_import(pdf_paths=self.selected_pdf_paths, root_dir=self.root_dir, job_name=f"{model_stem}_pdf_load")
+            project_dir = self._ensure_current_project_workspace()
+            model_stem = safe_filename(project_dir.name)
+            pdf_jobs_dir = self.current_project_subdirs["pdf_jobs"]
+            result = run_pdf_load_import(
+                pdf_paths=self.selected_pdf_paths,
+                root_dir=self.root_dir,
+                output_root=pdf_jobs_dir,
+                job_name=f"{model_stem}_pdf_load",
+            )
             self.pdf_import_result = result
             if result.mgtx_path:
                 self.pdf_mgtx_path.set(str(result.mgtx_path))
-                default_merge = self.data_dir / "mgt" / f"{model_stem}_pdf_load_types_merged.mgt"
+                default_merge = self.current_project_subdirs["mgt"] / f"{model_stem}_pdf_load_types_merged.mgt"
                 self.pdf_merge_output_path.set(str(default_merge))
             self.queue.put(("pdf_rows", result))
             valid_count = len(result.valid_rows)
@@ -510,6 +591,11 @@ class FloorLoadAutoApp(tk.Tk):
         source_mgt = self.exported_mgt_path.get().strip()
         pdf_mgtx = self.pdf_mgtx_path.get().strip()
         output_mgt = self.pdf_merge_output_path.get().strip()
+        if not output_mgt:
+            project_dir = self._ensure_current_project_workspace()
+            model_stem = safe_filename(project_dir.name)
+            output_mgt = str(self.current_project_subdirs["mgt"] / f"{model_stem}_pdf_load_types_merged.mgt")
+            self.pdf_merge_output_path.set(output_mgt)
         if not source_mgt:
             messagebox.showwarning("MGT 없음", "먼저 모델 MGT를 export하거나 직접 읽어 주세요.")
             return
@@ -564,7 +650,8 @@ class FloorLoadAutoApp(tk.Tk):
         def job():
             client = self._client()
             client.open_project(model)
-            out = self.data_dir / "mgt" / f"{Path(model).stem}_exported.mgt"
+            self._ensure_current_project_workspace(Path(model).stem)
+            out = self.current_project_subdirs["mgt"] / f"{Path(model).stem}_exported.mgt"
             client.export_mgt(out)
             self.exported_mgt_path.set(str(out))
             self._load_mgt_snapshot_impl(out)
@@ -580,6 +667,10 @@ class FloorLoadAutoApp(tk.Tk):
         self.run_worker("MGT 읽기", lambda: self._load_mgt_snapshot_impl(Path(path)))
 
     def _load_mgt_snapshot_impl(self, path: str | Path):
+        if self.current_project_dir:
+            self._ensure_current_project_workspace()
+        else:
+            self._ensure_current_project_workspace(Path(path).stem)
         stories, nodes, elements, mgt_text = parse_mgt_file(path)
         if not stories:
             raise RuntimeError("Story 정보가 없습니다. MGT의 *STORY 블록 또는 API STOR 데이터를 확인해 주세요.")
@@ -621,8 +712,8 @@ class FloorLoadAutoApp(tk.Tk):
 
         def job():
             model_name = Path(self.model_path.get() or self.exported_mgt_path.get() or "model").stem
-            out_dir = self.data_dir / "dxf_templates"
-            out_dir.mkdir(parents=True, exist_ok=True)
+            self._ensure_current_project_workspace()
+            out_dir = self.current_project_subdirs["dxf_templates"]
             test_path = out_dir / ".write_test.tmp"
             try:
                 test_path.write_text("test", encoding="utf-8")
@@ -687,17 +778,21 @@ class FloorLoadAutoApp(tk.Tk):
             return
 
         def job():
+            self._ensure_current_project_workspace()
             regions = self.loaded_regions or read_load_regions(dxf, mapping_path=self.mapping_path.get().strip() or None)
             story_nodes = select_nodes_by_story(self.nodes, story.elevation, float(self.story_tol_var.get()))
             if not story_nodes:
                 raise RuntimeError("선택 Story Level의 노드가 없습니다. Story tolerance 또는 선택 Story를 확인해 주세요.")
             model_stem = Path(self.model_path.get() or mgt).stem
-            out_mgt = self.data_dir / "mgt" / f"{safe_filename(model_stem)}_{safe_filename(story.name)}_floorload_full.mgt"
-            preview = self.data_dir / "reports" / f"{safe_filename(model_stem)}_{safe_filename(story.name)}_floorload_preview.dxf"
+            mgt_dir = self.current_project_subdirs["mgt"]
+            model_dir = self.current_project_subdirs["models"]
+            reports_dir = self.current_project_subdirs["reports"]
+            out_mgt = mgt_dir / f"{safe_filename(model_stem)}_{safe_filename(story.name)}_floorload_full.mgt"
+            preview = reports_dir / f"{safe_filename(model_stem)}_{safe_filename(story.name)}_floorload_preview.dxf"
             result = run_mgt_build_pipeline(
                 source_mgt_path=mgt,
                 output_mgt_path=out_mgt,
-                report_dir=self.data_dir / "reports",
+                report_dir=reports_dir,
                 preview_dxf_path=preview,
                 model_name=Path(self.model_path.get() or mgt).name,
                 story=story,
@@ -710,6 +805,9 @@ class FloorLoadAutoApp(tk.Tk):
             )
             if import_to_midas:
                 target = self.target_model_path.get().strip()
+                if not target:
+                    target = str(model_dir / f"{safe_filename(model_stem)}_{safe_filename(story.name)}_floorload_added.mgb")
+                    self.target_model_path.set(target)
                 if not target:
                     raise RuntimeError("결과 .mgb 저장 경로가 비어 있습니다.")
                 client = self._client()
@@ -990,7 +1088,7 @@ class FloorLoadAutoApp(tk.Tk):
                         "DXF 파일을 저장할 수 없습니다.\n\n"
                         "가능한 원인:\n"
                         "1. 같은 이름의 DXF 파일이 CAD/ZWCAD/AutoCAD에서 열려 있습니다.\n"
-                        "2. DATA\\dxf_templates 폴더에 쓰기 권한이 없습니다.\n"
+                        "2. DATA\\OUTPUT\\{project}\\dxf_templates 폴더에 쓰기 권한이 없습니다.\n"
                         "3. OneDrive/백신/권한 정책이 파일 생성을 막고 있습니다.\n\n"
                         "해결 방법:\n"
                         "- 열려 있는 DXF 파일을 닫고 다시 시도하세요.\n"

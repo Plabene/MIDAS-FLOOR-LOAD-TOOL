@@ -79,6 +79,7 @@ def run_pdf_load_import(
     *,
     pdf_paths: Sequence[str | Path],
     root_dir: str | Path,
+    output_root: str | Path | None = None,
     job_name: str | None = None,
 ) -> PdfLoadImportResult:
     """
@@ -106,7 +107,8 @@ def run_pdf_load_import(
     writer_mod = importlib.import_module("midas_mgtx_writer")
 
     run_id = job_name or f"pdf_load_{uuid.uuid4().hex[:8]}"
-    job_dir = root / "DATA" / "pdf_jobs" / _safe_name(run_id)
+    pdf_jobs_root = Path(output_root) if output_root is not None else root / "DATA" / "pdf_jobs"
+    job_dir = pdf_jobs_root / _safe_name(run_id)
     input_dir = job_dir / "source_pdfs"
     output_dir = job_dir
     output_dir.mkdir(parents=True, exist_ok=True)
