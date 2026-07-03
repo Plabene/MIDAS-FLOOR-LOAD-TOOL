@@ -1,0 +1,16 @@
+requests>=2.31
+pandas>=2.0
+openpyxl>=3.1
+pyyaml>=6.0
+ezdxf>=1.1
+shapely>=2.0
+numpy>=1.24
+scipy>=1.10
+pillow>=10.0
+pdfplumber>=0.11
+pymupdf>=1.24
+pytesseract>=0.3
+opencv-python>=4.8
+streamlit>=1.36
+pyinstaller>=6.0
+pytest>=8.0

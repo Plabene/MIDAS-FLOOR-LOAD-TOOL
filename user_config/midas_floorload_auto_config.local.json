@@ -1,0 +1,11 @@
+{
+  "base_url": "https://moa-engineers.midasit.com:443/gen",
+  "port": "",
+  "mapi_key": "eyJ1ciI6ImNoYnMxOTg5IiwicGciOiJnZW4iLCJjbiI6IkZudWR2Y2ZTU1EifQ.39172eb0711c252e9cd7b7c9da135a0182394f34b2b407b0602210904de6539d",
+  "timeout_seconds": 60,
+  "verify_ssl": true,
+  "story_tolerance": 0.01,
+  "snap_tolerance": 0.5,
+  "area_error_limit": 0.25,
+  "include_zero_load": false
+}

@@ -1,0 +1,20 @@
+# DXF hatch layer to MIDAS Floor Load Type mapping.
+# Matching order: direct -> regex -> strip_prefixes.
+case_sensitive: false
+
+strip_prefixes:
+  - "FL_"
+  - "DL_"
+  - "LL_"
+
+direct:
+  "FL_업무시설": "업무시설"
+  "FL_복도": "복도"
+  "DL_OFFICE": "OFFICE"
+  "LL_CORRIDOR": "CORRIDOR"
+
+regex:
+  - pattern: "^FL_(.+)$"
+    floor_load_type_name: "\\1"
+  - pattern: "^(?:DL|LL)_(.+)$"
+    floor_load_type_name: "\\1"

@@ -1,0 +1,67 @@
+project:
+  name: midas_floorload_auto_mgtx
+
+output:
+  file_name: midas_auto_define_floor_load_type.mgtx
+  encoding: cp949
+  create_empty_mgtx_when_no_rows: false
+
+units:
+  force: kN
+  length: m
+
+floor_load:
+  gravity_load_sign: -1
+  dead_sub_beam_weight_include: "YES"
+  live_sub_beam_weight_include: "NO"
+  review_sub_beam_weight_include: "NO"
+  wind_sub_beam_weight_include: "NO"
+  seismic_sub_beam_weight_include: "NO"
+  snow_sub_beam_weight_include: "NO"
+
+naming:
+  max_name_length: 40
+  prefix_floor_load_type: "FLT"
+  prefix_auto_desc: "PDF_AUTO"
+
+load_case_mode:
+  create_stldcase: true
+  use_existing_basic_cases: false
+
+error_policy:
+  invalid_value: "SKIP"
+  unknown_load: "CREATE_REVIEW_CASE"
+
+ocr:
+  enabled: true
+  dpi_candidates: [300, 400, 600]
+  default_dpi: 400
+  dpi: 300
+  fallback_dpi: 400
+  debug_dir: "debug"
+  compare_debug_dir: "debug/ocr_screening"
+  scan_compare_debug_dir: "debug/scan_ocr"
+  save_debug_images: true
+  engine: "tesseract"
+  engine_priority:
+    - "tesseract"
+    - "paddleocr"
+    - "easyocr"
+  psm_candidates: [4, 6, 11, 12]
+  min_text_length_for_text_pdf: 50
+  min_ocr_confidence: 55
+  include_review_required: false
+  allow_review_rows_in_mgtx: false
+  allow_inferred_unit_rows_in_mgtx: true
+  min_confidence_for_mgtx: 60
+  save_ocr_overlay: true
+  table_crop_enabled: true
+  table_crop_scale: 2.0
+  screening:
+    enabled: true
+    max_candidates: 20
+    ocr_max_candidates: 1
+    ocr_dpi_candidates: [300]
+    ocr_max_image_side: 1600
+    reference_similarity_threshold: 0.90
+    include_low_confidence_as_review: true

@@ -1,0 +1,480 @@
+[1]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 실 용 도 고정하중 활하중 사용하중 계수하중
+errors: ["하중값 없음", "confidence_score 50점 미만으로 MGTX 자동 입력 제외", "자동 입력 제외: 자동 입력 제외"]
+warnings: ["단위 미확인", "하중값 숫자를 확인할 수 없습니다.", "SLAB 키워드는 없지만 하중표 문맥 점수로 후보에 포함했습니다."]
+
+[2]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 구 분 THK (kN/m2) (kN/m2) (kN/m2) (kN/m2)
+errors: ["DL/LL이 아닌 하중은 MGTX Floor Load Type 자동 입력에서 제외하고 검토 대상으로 남깁니다.", "하중값 없음", "confidence_score 50점 미만으로 MGTX 자동 입력 제외", "자동 입력 제외: 자동 입력 제외"]
+warnings: ["하중값 숫자를 확인할 수 없습니다."]
+
+[3]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: SLAB ( t= 150 ) 3.60
+errors: ["자동 입력 제외: SLAB/슬래브 하중은 골조 하중이 아니므로 자동 입력 제외"]
+warnings: ["SLAB/슬래브 하중은 골조 하중이 아니므로 자동 입력 제외", "고정하중 내부 합계와 PDF 최종 고정합계하중이 불일치합니다.", "confidence_score 50~79점으로 검토 필요"]
+
+[4]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: Ceiling 및 단열재 0.30
+errors: ["자동 입력 제외: 세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외"]
+warnings: ["세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외", "고정하중 내부 합계와 PDF 최종 고정합계하중이 불일치합니다.", "confidence_score 50~79점으로 검토 필요"]
+
+[5]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 합 계 6.20
+errors: ["자동 입력 제외: 세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외"]
+warnings: ["세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외", "고정하중 내부 합계와 PDF 최종 고정합계하중이 불일치합니다.", "confidence_score 50~79점으로 검토 필요"]
+
+[6]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 무근콘크리트 ( t= 100 ) 2.30
+errors: ["자동 입력 제외: 세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외"]
+warnings: ["세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외", "고정하중 내부 합계와 PDF 최종 고정합계하중이 불일치합니다.", "confidence_score 50~79점으로 검토 필요"]
+
+[7]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 합 계 7.20
+errors: ["자동 입력 제외: 세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외"]
+warnings: ["세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외", "고정하중 내부 합계와 PDF 최종 고정합계하중이 불일치합니다.", "confidence_score 50~79점으로 검토 필요"]
+
+[8]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 합 계 18.20
+errors: ["자동 입력 제외: 세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외"]
+warnings: ["세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외", "고정하중 내부 합계와 PDF 최종 고정합계하중이 불일치합니다.", "confidence_score 50~79점으로 검토 필요"]
+
+[9]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 합 계 4.50
+errors: ["자동 입력 제외: 세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외"]
+warnings: ["세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외", "고정하중 내부 합계와 PDF 최종 고정합계하중이 불일치합니다.", "confidence_score가 MGTX 최소 기준(60) 미만입니다."]
+
+[10]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 무근 콘크리트 ( t= 120 ) 2.76
+errors: ["자동 입력 제외: 세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외"]
+warnings: ["세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외", "고정하중 내부 합계와 PDF 최종 고정합계하중이 불일치합니다.", "confidence_score가 MGTX 최소 기준(60) 미만입니다."]
+
+[11]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 방수 및 몰탈 ( t= 30 ) 0.60
+errors: ["자동 입력 제외: 세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외"]
+warnings: ["세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외", "고정하중 내부 합계와 PDF 최종 고정합계하중이 불일치합니다.", "confidence_score가 MGTX 최소 기준(60) 미만입니다."]
+
+[12]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 합 계 12.26
+errors: ["자동 입력 제외: 세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외"]
+warnings: ["세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외", "고정하중 내부 합계와 PDF 최종 고정합계하중이 불일치합니다.", "confidence_score가 MGTX 최소 기준(60) 미만입니다."]
+
+[13]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 토피 ( t= 380 ) 6.84
+errors: ["자동 입력 제외: 세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외"]
+warnings: ["세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외", "고정하중 내부 합계와 PDF 최종 고정합계하중이 불일치합니다.", "confidence_score가 MGTX 최소 기준(60) 미만입니다."]
+
+[14]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 합 계 14.48
+errors: ["자동 입력 제외: 세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외"]
+warnings: ["세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외", "고정하중 내부 합계와 PDF 최종 고정합계하중이 불일치합니다.", "confidence_score가 MGTX 최소 기준(60) 미만입니다."]
+
+[15]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 합 계 7.64
+errors: ["자동 입력 제외: 세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외"]
+warnings: ["세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외", "고정하중 내부 합계와 PDF 최종 고정합계하중이 불일치합니다.", "confidence_score가 MGTX 최소 기준(60) 미만입니다."]
+
+[16]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: (*계수하중=1.2X고정하중+1.6X활하중+1.6X토압)
+errors: ["confidence_score 50점 미만으로 MGTX 자동 입력 제외", "자동 입력 제외: Floor Load Type 이름을 신뢰도 있게 확정하지 못했습니다."]
+warnings: ["단위 미확인", "표 구조를 확정하지 못해 마지막 숫자를 후보 하중값으로 사용", "단위가 불명확하여 자동 입력에서 검토/제외 대상입니다.", "단위가 없어 검토가 필요합니다.", "SLAB 키워드는 없지만 하중표 문맥 점수로 후보에 포함했습니다."]
+
+[17]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 고정하중 활하중 사용하중 계수하중
+errors: ["하중값 없음", "confidence_score 50점 미만으로 MGTX 자동 입력 제외", "자동 입력 제외: Floor Load Type 이름을 신뢰도 있게 확정하지 못했습니다."]
+warnings: ["단위 미확인", "하중값 숫자를 확인할 수 없습니다.", "SLAB 키워드는 없지만 하중표 문맥 점수로 후보에 포함했습니다."]
+
+[18]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 옥탑지붕층 1.0 7.20 9.0
+errors: ["confidence_score 50점 미만으로 MGTX 자동 입력 제외", "자동 입력 제외: Floor Load Type 이름을 신뢰도 있게 확정하지 못했습니다."]
+warnings: ["단위 미확인", "표 구조를 확정하지 못해 마지막 숫자를 후보 하중값으로 사용", "단위가 불명확하여 자동 입력에서 검토/제외 대상입니다.", "단위가 없어 검토가 필요합니다."]
+
+[19]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 지붕층 3.0 9.20 12.2
+errors: ["confidence_score 50점 미만으로 MGTX 자동 입력 제외", "자동 입력 제외: Floor Load Type 이름을 신뢰도 있게 확정하지 못했습니다."]
+warnings: ["단위 미확인", "표 구조를 확정하지 못해 마지막 숫자를 후보 하중값으로 사용", "단위가 불명확하여 자동 입력에서 검토/제외 대상입니다.", "단위가 없어 검토가 필요합니다."]
+
+[20]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 태양광 1.00
+errors: ["DL/LL이 아닌 하중은 MGTX Floor Load Type 자동 입력에서 제외하고 검토 대상으로 남깁니다.", "confidence_score 50점 미만으로 MGTX 자동 입력 제외", "자동 입력 제외: Floor Load Type 이름을 신뢰도 있게 확정하지 못했습니다."]
+warnings: ["단위 미확인", "표 구조를 확정하지 못해 마지막 숫자를 후보 하중값으로 사용", "단위가 불명확하여 자동 입력에서 검토/제외 대상입니다.", "단위가 없어 검토가 필요합니다."]
+
+[21]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 지붕층 Ceiling 및 단열재 0.30
+errors: ["confidence_score 50점 미만으로 MGTX 자동 입력 제외", "자동 입력 제외: 개별 마감/상세 하중은 합계 또는 골조 하중 우선 규칙에 따라 제외"]
+warnings: ["단위 미확인", "표 구조를 확정하지 못해 마지막 숫자를 후보 하중값으로 사용", "단위가 불명확하여 자동 입력에서 검토/제외 대상입니다.", "단위가 없어 검토가 필요합니다.", "개별 마감/상세 하중은 합계 또는 골조 하중 우선 규칙에 따라 제외"]
+
+[22]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: (태양광)
+errors: ["DL/LL이 아닌 하중은 MGTX Floor Load Type 자동 입력에서 제외하고 검토 대상으로 남깁니다.", "하중값 없음", "confidence_score 50점 미만으로 MGTX 자동 입력 제외", "자동 입력 제외: Floor Load Type 이름을 신뢰도 있게 확정하지 못했습니다."]
+warnings: ["단위 미확인", "하중값 숫자를 확인할 수 없습니다."]
+
+[23]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 옥상조경 Ceiling 및 단열재 0.30 3.0 21.20 26.6
+errors: ["confidence_score 50점 미만으로 MGTX 자동 입력 제외", "자동 입력 제외: 개별 마감/상세 하중은 합계 또는 골조 하중 우선 규칙에 따라 제외"]
+warnings: ["단위 미확인", "표 구조를 확정하지 못해 마지막 숫자를 후보 하중값으로 사용", "단위가 불명확하여 자동 입력에서 검토/제외 대상입니다.", "단위가 없어 검토가 필요합니다.", "개별 마감/상세 하중은 합계 또는 골조 하중 우선 규칙에 따라 제외"]
+
+[24]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 1
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 조적하중 5.00
+errors: ["confidence_score 50점 미만으로 MGTX 자동 입력 제외", "자동 입력 제외: 슬래브 하중 정보가 없고 지붕 예외 키워드도 없어 기초하중 또는 비바닥하중으로 판단하여 제외"]
+warnings: ["단위 미확인", "표 구조를 확정하지 못해 마지막 숫자를 후보 하중값으로 사용", "단위가 불명확하여 자동 입력에서 검토/제외 대상입니다.", "단위가 없어 검토가 필요합니다.", "슬래브 하중 정보가 없고 지붕 예외 키워드도 없어 기초하중 또는 비바닥하중으로 판단하여 제외"]
+
+[25]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 2
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 실 용 도 고정하중 활하중 사용하중 계수하중
+errors: ["하중값 없음", "confidence_score 50점 미만으로 MGTX 자동 입력 제외", "자동 입력 제외: 자동 입력 제외"]
+warnings: ["단위 미확인", "하중값 숫자를 확인할 수 없습니다.", "SLAB 키워드는 없지만 하중표 문맥 점수로 후보에 포함했습니다."]
+
+[26]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 2
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 구 분 THK (kN/m2) (kN/m2) (kN/m2) (kN/m2)
+errors: ["DL/LL이 아닌 하중은 MGTX Floor Load Type 자동 입력에서 제외하고 검토 대상으로 남깁니다.", "하중값 없음", "confidence_score 50점 미만으로 MGTX 자동 입력 제외", "자동 입력 제외: 자동 입력 제외"]
+warnings: ["하중값 숫자를 확인할 수 없습니다."]
+
+[27]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 2
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 합 계 4.60
+errors: ["자동 입력 제외: 세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외"]
+warnings: ["세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외", "고정하중 내부 합계와 PDF 최종 고정합계하중이 불일치합니다.", "confidence_score가 MGTX 최소 기준(60) 미만입니다."]
+
+[28]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 2
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 합 계 2.30
+errors: ["자동 입력 제외: 세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외"]
+warnings: ["세부 고정하중 항목은 검증용으로만 사용하고 MGTX DL 입력값 계산에서는 제외", "고정하중 내부 합계와 PDF 최종 고정합계하중이 불일치합니다.", "confidence_score가 MGTX 최소 기준(60) 미만입니다."]
+
+[29]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 2
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: (*계수하중=1.2X고정하중+1.6X활하중+1.6X토압)
+errors: ["confidence_score 50점 미만으로 MGTX 자동 입력 제외", "자동 입력 제외: Floor Load Type 이름을 신뢰도 있게 확정하지 못했습니다."]
+warnings: ["단위 미확인", "표 구조를 확정하지 못해 마지막 숫자를 후보 하중값으로 사용", "단위가 불명확하여 자동 입력에서 검토/제외 대상입니다.", "단위가 없어 검토가 필요합니다.", "SLAB 키워드는 없지만 하중표 문맥 점수로 후보에 포함했습니다."]
+
+[30]
+source_pdf: 구조계산서_하중표.pdf
+source_page: 2
+extraction_method: text_layer
+failure_stage: None
+failure_reason: None
+ocr_word_count: None
+ocr_line_count: None
+numeric_candidate_count: None
+unit_candidate_count: None
+keyword_candidate_count: None
+final_candidate_row_count: None
+raw_text: 고정하중 활하중 사용하중 계수하중
+errors: ["하중값 없음", "confidence_score 50점 미만으로 MGTX 자동 입력 제외", "자동 입력 제외: Floor Load Type 이름을 신뢰도 있게 확정하지 못했습니다."]
+warnings: ["단위 미확인", "하중값 숫자를 확인할 수 없습니다.", "SLAB 키워드는 없지만 하중표 문맥 점수로 후보에 포함했습니다."]
+

@@ -1,0 +1,331 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, Sequence, TYPE_CHECKING
+import csv
+import io
+import json
+import math
+
+try:
+    import ezdxf
+except ImportError:  # preview DXF 생성 시점에 사용자에게 명확히 안내
+    ezdxf = None
+import pandas as pd
+from shapely.geometry import Polygon
+
+if TYPE_CHECKING:
+    from .dxf_load_reader import LoadRegion
+from .mgt_parser import Node, Story, read_text, write_text
+
+
+@dataclass(frozen=True)
+class FloorLoadAssignment:
+    load_type_name: str
+    dl: float
+    ll: float
+    node_ids: tuple[int, ...]
+    source_layer: str
+    source_type: str
+    area: float
+    status: str
+    warnings: tuple[str, ...]
+
+    def to_record(self) -> dict:
+        return {
+            "하중명": self.load_type_name,
+            "DL": self.dl,
+            "LL": self.ll,
+            "절점수": len(self.node_ids),
+            "절점목록": ",".join(str(n) for n in self.node_ids),
+            "DXF 레이어": self.source_layer,
+            "DXF 객체": self.source_type,
+            "면적": self.area,
+            "상태": self.status,
+            "경고": " | ".join(self.warnings),
+        }
+
+
+@dataclass(frozen=True)
+class BuildResult:
+    full_mgt_path: Path
+    report_xlsx_path: Path
+    report_csv_path: Path
+    preview_dxf_path: Path
+    assignment_count: int
+    warning_count: int
+
+
+def build_assignments_from_regions(
+    *,
+    regions: Iterable['LoadRegion'],
+    story_nodes: Sequence[Node],
+    snap_tolerance: float = 0.5,
+    include_zero_load: bool = False,
+) -> list[FloorLoadAssignment]:
+    assignments: list[FloorLoadAssignment] = []
+    for region in regions:
+        warnings = list(region.warnings)
+        if region.load is None:
+            assignments.append(
+                FloorLoadAssignment("", 0.0, 0.0, tuple(), region.region.layer, region.region.source_type, region.area, "LOAD_PARSE_FAILED", tuple(warnings))
+            )
+            continue
+        if not include_zero_load and abs(region.load.dl) <= 1.0e-12 and abs(region.load.ll) <= 1.0e-12:
+            warnings.append("DL/LL이 모두 0이므로 입력 제외되었습니다. 0 값도 명시 입력 옵션을 켜면 기록됩니다.")
+            assignments.append(
+                FloorLoadAssignment(region.load.real_name, region.load.dl, region.load.ll, tuple(), region.region.layer, region.region.source_type, region.area, "ZERO_LOAD_SKIPPED", tuple(warnings))
+            )
+            continue
+        node_ids, max_error = _snap_polygon_vertices_to_nodes(region.region.vertices, story_nodes)
+        if len(node_ids) < 3:
+            warnings.append("해치 경계에 대응되는 절점이 3개 미만입니다. Story 선택 또는 CAD 좌표계를 확인하세요.")
+            status = "BOUNDARY_NODE_COUNT_TOO_LOW"
+        elif max_error > snap_tolerance:
+            warnings.append(f"최대 snap 오차 {max_error:.6g}이 허용값 {snap_tolerance:.6g}을 초과했습니다.")
+            status = "SNAP_ERROR_EXCEEDED"
+        else:
+            status = "OK" if not warnings else "REVIEW"
+        assignments.append(
+            FloorLoadAssignment(
+                load_type_name=region.load.real_name,
+                dl=region.load.dl,
+                ll=region.load.ll,
+                node_ids=tuple(node_ids),
+                source_layer=region.region.layer,
+                source_type=region.region.source_type,
+                area=region.area,
+                status=status,
+                warnings=tuple(warnings),
+            )
+        )
+    return assignments
+
+
+def patch_full_mgt_with_floorloads(
+    *,
+    source_mgt_path: str | Path,
+    output_mgt_path: str | Path,
+    assignments: Sequence[FloorLoadAssignment],
+    mode: str = "append",
+    encoding: str = "cp949",
+) -> Path:
+    text = read_text(source_mgt_path)
+    patched = patch_full_mgt_text(text, assignments=assignments, mode=mode)
+    return write_text(output_mgt_path, patched, encoding=encoding)
+
+
+def patch_full_mgt_text(text: str, *, assignments: Sequence[FloorLoadAssignment], mode: str = "append") -> str:
+    valid = [a for a in assignments if a.status in {"OK", "REVIEW"} and len(a.node_ids) >= 3]
+    lines = _logical_lines(text.splitlines())
+    if mode.lower() in {"overwrite", "replace"}:
+        lines = _remove_sections(lines, {"*FLOADTYPE", "*FLOORLOAD"})
+    existing_load_types = _existing_floadtype_names(lines)
+    floadtype_block = _make_floadtype_block(valid, existing_load_types)
+    floorload_block = _make_floorload_block(valid)
+    insert_blocks = floadtype_block + floorload_block
+    if not insert_blocks:
+        return "\r\n".join(lines) + "\r\n"
+    insert_at = next((i for i, line in enumerate(lines) if line.strip().upper().startswith("*ENDDATA")), len(lines))
+    patched = lines[:insert_at] + insert_blocks + [""] + lines[insert_at:]
+    return "\r\n".join(patched) + "\r\n"
+
+
+def write_reports(
+    *,
+    assignments: Sequence[FloorLoadAssignment],
+    output_dir: str | Path,
+    model_name: str,
+    story: Story,
+    dxf_name: str,
+) -> tuple[Path, Path]:
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for item in assignments:
+        row = item.to_record()
+        row.update({"모델명": model_name, "Story명": story.name, "Story Elevation": story.elevation, "DXF 파일명": dxf_name})
+        rows.append(row)
+    df = pd.DataFrame(rows)
+    xlsx = out / f"{Path(model_name).stem}_{story.name}_floorload_report.xlsx"
+    csv_path = out / f"{Path(model_name).stem}_{story.name}_floorload_report.csv"
+    df.to_excel(xlsx, index=False)
+    df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    return xlsx, csv_path
+
+
+def write_assignment_preview_dxf(assignments: Sequence[FloorLoadAssignment], nodes: Sequence[Node], output_path: str | Path) -> Path:
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if ezdxf is None:
+        raise RuntimeError("ezdxf가 설치되어 있지 않아 검증용 DXF를 생성할 수 없습니다. pip install ezdxf를 실행해 주세요.")
+    node_map = {n.node_id: n for n in nodes}
+    doc = ezdxf.new("R2010")
+    for layer, color in (("FLOAD_OK", 3), ("FLOAD_REVIEW", 1), ("FLOAD_SKIPPED", 8)):
+        if layer not in doc.layers:
+            doc.layers.add(layer, color=color)
+    msp = doc.modelspace()
+    for idx, item in enumerate(assignments, start=1):
+        pts = [(node_map[n].x, node_map[n].y) for n in item.node_ids if n in node_map]
+        if len(pts) >= 3:
+            layer = "FLOAD_OK" if item.status == "OK" else "FLOAD_REVIEW"
+            msp.add_lwpolyline(pts, close=True, dxfattribs={"layer": layer})
+            msp.add_text(f"{idx}:{item.load_type_name}:{item.status}", dxfattribs={"layer": layer, "height": 0.25}).set_placement(pts[0])
+        else:
+            layer = "FLOAD_SKIPPED"
+            msp.add_text(f"{idx}:{item.load_type_name}:{item.status}", dxfattribs={"layer": layer, "height": 0.25}).set_placement((0, -idx * 0.4))
+    doc.saveas(out)
+    return out
+
+
+def run_mgt_build_pipeline(
+    *,
+    source_mgt_path: str | Path,
+    output_mgt_path: str | Path,
+    report_dir: str | Path,
+    preview_dxf_path: str | Path,
+    model_name: str,
+    story: Story,
+    dxf_name: str,
+    regions: Sequence['LoadRegion'],
+    story_nodes: Sequence[Node],
+    snap_tolerance: float,
+    include_zero_load: bool,
+    mode: str = "append",
+    encoding: str = "cp949",
+) -> BuildResult:
+    assignments = build_assignments_from_regions(
+        regions=regions,
+        story_nodes=story_nodes,
+        snap_tolerance=snap_tolerance,
+        include_zero_load=include_zero_load,
+    )
+    full = patch_full_mgt_with_floorloads(source_mgt_path=source_mgt_path, output_mgt_path=output_mgt_path, assignments=assignments, mode=mode, encoding=encoding)
+    xlsx, csv_path = write_reports(assignments=assignments, output_dir=report_dir, model_name=model_name, story=story, dxf_name=dxf_name)
+    preview = write_assignment_preview_dxf(assignments, story_nodes, preview_dxf_path)
+    return BuildResult(
+        full_mgt_path=full,
+        report_xlsx_path=xlsx,
+        report_csv_path=csv_path,
+        preview_dxf_path=preview,
+        assignment_count=sum(1 for a in assignments if a.status in {"OK", "REVIEW"} and len(a.node_ids) >= 3),
+        warning_count=sum(len(a.warnings) + (0 if a.status == "OK" else 1) for a in assignments),
+    )
+
+
+def _snap_polygon_vertices_to_nodes(vertices: Sequence[tuple[float, float]], story_nodes: Sequence[Node]) -> tuple[list[int], float]:
+    if not story_nodes:
+        return [], math.inf
+    node_ids: list[int] = []
+    max_error = 0.0
+    seen = set()
+    for x, y in vertices:
+        best = min(story_nodes, key=lambda n: (n.x - x) ** 2 + (n.y - y) ** 2)
+        dist = math.hypot(best.x - x, best.y - y)
+        max_error = max(max_error, dist)
+        if best.node_id not in seen:
+            seen.add(best.node_id)
+            node_ids.append(best.node_id)
+    return node_ids, max_error
+
+
+def _logical_lines(lines: list[str]) -> list[str]:
+    # MGT line continuation '\\'를 여기서는 해석하지 않고 원문 보존한다.
+    return list(lines)
+
+
+def _remove_sections(lines: list[str], section_names: set[str]) -> list[str]:
+    result: list[str] = []
+    skip = False
+    for line in lines:
+        stripped = line.strip().upper()
+        if stripped.startswith("*"):
+            head = stripped.split(None, 1)[0]
+            skip = head in section_names
+        if not skip:
+            result.append(line)
+    return result
+
+
+def _existing_floadtype_names(lines: list[str]) -> set[str]:
+    names = set()
+    in_block = False
+    expect_name_line = False
+    for line in lines:
+        stripped = line.strip()
+        upper = stripped.upper()
+        if upper.startswith("*FLOADTYPE"):
+            in_block = True
+            expect_name_line = True
+            continue
+        if in_block and upper.startswith("*"):
+            break
+        if not in_block or not stripped or stripped.startswith(";"):
+            continue
+        if expect_name_line:
+            parts = _csv_split(stripped)
+            if parts:
+                names.add(parts[0].strip().strip('"'))
+            expect_name_line = False
+        else:
+            expect_name_line = True
+    return names
+
+
+def _make_floadtype_block(assignments: Sequence[FloorLoadAssignment], existing_names: set[str]) -> list[str]:
+    unique: dict[str, FloorLoadAssignment] = {}
+    for a in assignments:
+        if a.load_type_name and a.load_type_name not in unique:
+            unique[a.load_type_name] = a
+    lines = ["", "*FLOADTYPE    ; Define Floor Load Type", "; NAME, DESC", "; LCNAME1, FLOAD1, bSBU1, ..., LCNAME8, FLOAD8, bSBU8"]
+    added = 0
+    for name, item in unique.items():
+        if name in existing_names:
+            continue
+        fields = []
+        if abs(item.dl) > 1.0e-12:
+            fields.extend(["DL", _fmt_load(-abs(item.dl)), "YES"])
+        if abs(item.ll) > 1.0e-12:
+            fields.extend(["LL", _fmt_load(-abs(item.ll)), "NO"])
+        if not fields:
+            continue
+        lines.append(f"   {_mgt_field(name)}, DXF_AUTO DL={item.dl:g} LL={item.ll:g}")
+        lines.append("   " + ", ".join(fields))
+        added += 1
+    return lines if added else []
+
+
+def _make_floorload_block(assignments: Sequence[FloorLoadAssignment]) -> list[str]:
+    lines = [
+        "",
+        "*FLOORLOAD    ; Floor Loads",
+        "; LTNAME, iDIST, ANGLE, iSBEAM, SBANG, SBUW, DIR, bPROJ, DESC, bEX, bAL, GROUP, NODE1, ..., NODEn",
+    ]
+    added = 0
+    for item in assignments:
+        if len(item.node_ids) < 3:
+            continue
+        desc = f"DXF_AUTO layer={item.source_layer} type={item.source_type}"
+        node_text = ", ".join(str(n) for n in item.node_ids)
+        # 기존 MGT 샘플과 동일하게 Two Way(iDIST=2), GZ, bPROJ=NO, bAL=YES 형식 사용.
+        lines.append(f"   {_mgt_field(item.load_type_name)}, 2, 0, 0, 0, 0, GZ, NO, {_mgt_field(desc)}, NO, YES, DXF_FLOORLOAD, {node_text}")
+        added += 1
+    return lines if added else []
+
+
+def _csv_split(line: str) -> list[str]:
+    try:
+        return [c.strip() for c in next(csv.reader(io.StringIO(line), skipinitialspace=True))]
+    except Exception:
+        return [c.strip() for c in line.split(",")]
+
+
+def _mgt_field(value: object) -> str:
+    text = " ".join(str(value or "").replace("\r", " ").replace("\n", " ").split()).replace('"', "'")
+    return f'"{text}"' if "," in text else text
+
+
+def _fmt_load(value: float) -> str:
+    text = f"{float(value):.6f}".rstrip("0").rstrip(".")
+    return "0" if text in {"", "-0"} else text

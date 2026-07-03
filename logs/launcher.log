@@ -1,0 +1,61 @@
+============================================================ 
+MIDAS FLOOR LOAD TOOL launcher log 
+Date: 2026-07-03 12:38:08.51 
+Root: D:\MIDAS FLOOR LOAD TOOL\ 
+============================================================ 
+Command: .venv\Scripts\python.exe -m app.main 
+2026-07-03 12:38:23,403 [INFO] midas_floorload_auto_v4 - [모델 열기/MGT Export] 시작
+2026-07-03 12:38:23,434 [INFO] midas_floorload_auto_v4 - MIDAS API request attempt=1/2 method=POST endpoint=doc/OPEN body={'Argument': 'C:\\모델링\\241025_반포동 모델링.mgbx'}
+2026-07-03 12:38:27,576 [INFO] midas_floorload_auto_v4 - MIDAS API response endpoint=doc/OPEN status=200 text={"message":"MIDAS GEN NX command complete"}
+2026-07-03 12:38:27,577 [INFO] midas_floorload_auto_v4 - MIDAS API request attempt=1/2 method=POST endpoint=doc/EXPORTMXT body={'Argument': 'D:\\MIDAS FLOOR LOAD TOOL\\DATA\\mgt\\241025_반포동 모델링_exported.mgt'}
+2026-07-03 12:38:28,096 [INFO] midas_floorload_auto_v4 - MIDAS API response endpoint=doc/EXPORTMXT status=200 text={"message":"MIDAS GEN NX command complete"}
+2026-07-03 12:38:28,176 [INFO] midas_floorload_auto_v4 - [모델 열기/MGT Export] 완료: 모델 열기 및 MGT export 완료: D:\MIDAS FLOOR LOAD TOOL\DATA\mgt\241025_반포동 모델링_exported.mgt
+2026-07-03 12:38:28,204 [INFO] midas_floorload_auto_v4 - Story 선택: B3
+2026-07-03 12:38:39,441 [INFO] midas_floorload_auto_v4 - Story 선택: 3F
+2026-07-03 12:38:39,995 [INFO] midas_floorload_auto_v4 - [DXF 템플릿 생성] 시작
+2026-07-03 12:38:40,008 [ERROR] midas_floorload_auto_v4 - DXF 템플릿 생성 failed
+Traceback (most recent call last):
+  File "D:\MIDAS FLOOR LOAD TOOL\app\main.py", line 969, in wrapper
+    result = fn()
+  File "D:\MIDAS FLOOR LOAD TOOL\app\main.py", line 625, in job
+    result = write_story_centerline_dxf(
+        output_path=out,
+    ...<4 lines>...
+        story_tolerance=float(self.story_tol_var.get()),
+    )
+  File "D:\MIDAS FLOOR LOAD TOOL\app\core\dxf_template_writer.py", line 113, in write_story_centerline_dxf
+    doc.saveas(out)
+    ~~~~~~~~~~^^^^^
+  File "D:\MIDAS FLOOR LOAD TOOL\.venv\Lib\site-packages\ezdxf\document.py", line 529, in saveas
+    self.save(encoding=encoding, fmt=fmt)
+    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\MIDAS FLOOR LOAD TOOL\.venv\Lib\site-packages\ezdxf\document.py", line 555, in save
+    fp = io.open(
+        self.filename, mode="wt", encoding=enc, errors="dxfreplace"  # type: ignore
+    )
+PermissionError: [Errno 13] Permission denied: 'D:\\MIDAS FLOOR LOAD TOOL\\DATA\\dxf_templates\\241025_반포동_모델링_3F_floorload_template.dxf'
+2026-07-03 12:38:40,142 [INFO] midas_floorload_auto_v4 - [DXF 템플릿 생성] 오류: [Errno 13] Permission denied: 'D:\\MIDAS FLOOR LOAD TOOL\\DATA\\dxf_templates\\241025_반포동_모델링_3F_floorload_template.dxf'
+2026-07-03 12:38:50,973 [INFO] midas_floorload_auto_v4 - [DXF 템플릿 생성] 시작
+2026-07-03 12:38:50,981 [ERROR] midas_floorload_auto_v4 - DXF 템플릿 생성 failed
+Traceback (most recent call last):
+  File "D:\MIDAS FLOOR LOAD TOOL\app\main.py", line 969, in wrapper
+    result = fn()
+  File "D:\MIDAS FLOOR LOAD TOOL\app\main.py", line 625, in job
+    result = write_story_centerline_dxf(
+        output_path=out,
+    ...<4 lines>...
+        story_tolerance=float(self.story_tol_var.get()),
+    )
+  File "D:\MIDAS FLOOR LOAD TOOL\app\core\dxf_template_writer.py", line 113, in write_story_centerline_dxf
+    doc.saveas(out)
+    ~~~~~~~~~~^^^^^
+  File "D:\MIDAS FLOOR LOAD TOOL\.venv\Lib\site-packages\ezdxf\document.py", line 529, in saveas
+    self.save(encoding=encoding, fmt=fmt)
+    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\MIDAS FLOOR LOAD TOOL\.venv\Lib\site-packages\ezdxf\document.py", line 555, in save
+    fp = io.open(
+        self.filename, mode="wt", encoding=enc, errors="dxfreplace"  # type: ignore
+    )
+PermissionError: [Errno 13] Permission denied: 'D:\\MIDAS FLOOR LOAD TOOL\\DATA\\dxf_templates\\241025_반포동_모델링_3F_floorload_template.dxf'
+2026-07-03 12:38:51,061 [INFO] midas_floorload_auto_v4 - [DXF 템플릿 생성] 오류: [Errno 13] Permission denied: 'D:\\MIDAS FLOOR LOAD TOOL\\DATA\\dxf_templates\\241025_반포동_모델링_3F_floorload_template.dxf'
+Program closed normally. 

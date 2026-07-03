@@ -1,0 +1,96 @@
+load_mappings:
+  - keywords: ["마감하중", "마감", "방수", "방수층", "누름콘크리트", "누름 콘크리트"]
+    category: dead
+    load_case_prefix: DL_FINISH
+    mgtx_load_type_code: D
+    review_flag: false
+
+  - keywords: ["슬래브 자중", "슬라브 자중", "자중"]
+    category: dead
+    load_case_prefix: DL_SELF
+    mgtx_load_type_code: D
+    review_flag: false
+
+  - keywords: ["벽체하중", "벽체 하중", "벽하중", "조적"]
+    category: dead
+    load_case_prefix: DL_WALL
+    mgtx_load_type_code: D
+    review_flag: false
+
+  - keywords: ["천장하중", "천장 하중", "천정하중", "천정 하중", "ceiling"]
+    category: dead
+    load_case_prefix: DL_CEILING
+    mgtx_load_type_code: D
+    review_flag: false
+
+  - keywords: ["고정하중", "사하중", "DEAD", "DL"]
+    category: dead
+    load_case_prefix: DL_GENERAL
+    mgtx_load_type_code: D
+    review_flag: false
+
+  - keywords: ["사무실", "업무시설", "오피스"]
+    category: live
+    load_case_prefix: LL_OFFICE
+    mgtx_load_type_code: L
+    review_flag: false
+
+  - keywords: ["주거", "주택", "아파트", "세대"]
+    category: live
+    load_case_prefix: LL_RESIDENTIAL
+    mgtx_load_type_code: L
+    review_flag: false
+
+  - keywords: ["복도"]
+    category: live
+    load_case_prefix: LL_CORRIDOR
+    mgtx_load_type_code: L
+    review_flag: false
+
+  - keywords: ["계단"]
+    category: live
+    load_case_prefix: LL_STAIR
+    mgtx_load_type_code: L
+    review_flag: false
+
+  - keywords: ["옥상", "지붕"]
+    category: live
+    load_case_prefix: LL_ROOF
+    mgtx_load_type_code: L
+    review_flag: false
+
+  - keywords: ["활하중", "LIVE", "LL", "적재하중", "적재 하중"]
+    category: live
+    load_case_prefix: LL_GENERAL
+    mgtx_load_type_code: L
+    review_flag: false
+
+  - keywords: ["설비하중", "설비 하중", "장비하중", "장비 하중", "기계하중", "기계 하중", "수조"]
+    category: review
+    load_case_prefix: RV_EQUIP
+    mgtx_load_type_code: D
+    review_flag: true
+
+  - keywords: ["풍하중", "풍 하중", "풍압", "WIND"]
+    category: wind
+    load_case_prefix: WIND
+    mgtx_load_type_code: W
+    review_flag: true
+
+  - keywords: ["지진하중", "지진 하중", "지진", "SEISMIC"]
+    category: seismic
+    load_case_prefix: SEISMIC
+    mgtx_load_type_code: E
+    review_flag: true
+
+  - keywords: ["적설하중", "적설", "설하중", "설 하중", "눈하중", "눈 하중", "SNOW"]
+    category: snow
+    load_case_prefix: SNOW
+    mgtx_load_type_code: S
+    review_flag: true
+
+  - keywords: ["토압", "수압", "온도하중", "온도 하중", "크레인", "충격", "충격하중"]
+    category: review
+    load_case_prefix: RV_SPECIAL
+    mgtx_load_type_code: D
+    review_flag: true
