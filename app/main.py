@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 import os
 from datetime import datetime
 from pathlib import Path
@@ -93,6 +94,33 @@ def _mgbx_path(path: str | Path) -> Path:
 
 ALL_STORIES_VALUE = "__ALL_STORIES__"
 ALL_STORIES_LABEL = "전층"
+
+
+def _format_dxf_validation_summary(regions) -> str:
+    total = len(regions or [])
+    ok_count = sum(1 for region in regions if region.status in {"OK", "REVIEW"} or str(region.status).startswith("REVIEW_"))
+    story_counts = Counter(str(getattr(region.region, "story_name", "") or "") for region in regions)
+    recognized_story_count = total - story_counts.get("", 0)
+    metadata_used_count = sum(1 for region in regions if bool(getattr(region.region, "layout_metadata_used", False)))
+    transform_count = sum(1 for region in regions if bool(getattr(region.region, "transform_applied", False)))
+    lines = [
+        "DXF 검증 완료:",
+        f"- 하중영역: {total}개",
+        f"- 입력 가능 후보: {ok_count}개",
+        f"- Story 인식: {recognized_story_count}개",
+    ]
+    for story_name, count in sorted((name, count) for name, count in story_counts.items() if name):
+        lines.append(f"- {story_name}: {count}개")
+    lines.append(f"- metadata: {'사용됨' if metadata_used_count else '미사용'}")
+    if metadata_used_count:
+        lines.append(f"- transform_applied: {transform_count}개")
+    return "\n".join(lines)
+
+
+def _format_region_bbox_for_ui(values) -> str:
+    if not values:
+        return ""
+    return ",".join(f"{float(value):.3f}".rstrip("0").rstrip(".") for value in values)
 
 
 class FloorLoadAutoApp(tk.Tk):
@@ -454,7 +482,27 @@ class FloorLoadAutoApp(tk.Tk):
         ttk.Button(f, text="DXF 검증", command=self.validate_user_dxf).grid(row=6, column=0, sticky="w", padx=8, pady=8)
         self.dxf_tree = ttk.Treeview(
             f,
-            columns=("status", "story", "source", "layer", "pattern", "solid", "mode", "mode_source", "dir", "load", "dl", "ll", "area", "source_id", "warnings"),
+            columns=(
+                "status",
+                "story",
+                "metadata",
+                "transform",
+                "source",
+                "layer",
+                "pattern",
+                "solid",
+                "mode",
+                "mode_source",
+                "dir",
+                "load",
+                "dl",
+                "ll",
+                "area",
+                "placed_bbox",
+                "model_bbox",
+                "source_id",
+                "warnings",
+            ),
             show="headings",
             height=12,
         )
@@ -466,6 +514,10 @@ class FloorLoadAutoApp(tk.Tk):
             self.dxf_tree.column(col, width=width)
         self.dxf_tree.heading("story", text="Story")
         self.dxf_tree.column("story", width=90)
+        self.dxf_tree.heading("metadata", text="metadata")
+        self.dxf_tree.column("metadata", width=85, anchor="center")
+        self.dxf_tree.heading("transform", text="transform")
+        self.dxf_tree.column("transform", width=85, anchor="center")
         for col, txt, width in (
             ("pattern", "HATCH", 95),
             ("solid", "SOLID", 60),
@@ -475,6 +527,10 @@ class FloorLoadAutoApp(tk.Tk):
         ):
             self.dxf_tree.heading(col, text=txt)
             self.dxf_tree.column(col, width=width)
+        self.dxf_tree.heading("placed_bbox", text="placed_bbox")
+        self.dxf_tree.column("placed_bbox", width=165)
+        self.dxf_tree.heading("model_bbox", text="model_bbox")
+        self.dxf_tree.column("model_bbox", width=165)
         self.dxf_tree.heading("source_id", text="source_id")
         self.dxf_tree.column("source_id", width=110)
         self.dxf_tree.grid(row=7, column=0, columnspan=3, sticky="nsew", padx=8, pady=8)
@@ -838,8 +894,7 @@ class FloorLoadAutoApp(tk.Tk):
             self.queue.put(("regions", regions))
             if not regions:
                 raise RuntimeError("선택한 DXF에서 하중 해치를 찾지 못했습니다. 하중 영역을 HATCH로 작성하거나 폐합 Polyline을 사용해 주세요.")
-            ok_count = sum(1 for r in regions if r.status in {"OK", "REVIEW"})
-            return f"DXF 검증 완료: 전체 {len(regions)}개, 입력 가능 후보 {ok_count}개"
+            return _format_dxf_validation_summary(regions)
 
         self.run_worker("DXF 검증", job)
 
@@ -1338,6 +1393,8 @@ class FloorLoadAutoApp(tk.Tk):
                 values=(
                     region.status,
                     region.region.story_name,
+                    "YES" if getattr(region.region, "layout_metadata_used", False) else "NO",
+                    "YES" if getattr(region.region, "transform_applied", False) else "NO",
                     region.region.source_type,
                     region.region.layer,
                     region.region.hatch_pattern_name,
@@ -1349,6 +1406,8 @@ class FloorLoadAutoApp(tk.Tk):
                     "" if not load else f"{load.dl:.2f}",
                     "" if not load else f"{load.ll:.2f}",
                     f"{region.area:.6g}",
+                    _format_region_bbox_for_ui(getattr(region.region, "placed_bbox", ()) or ()),
+                    _format_region_bbox_for_ui(getattr(region.region, "model_bbox", ()) or getattr(region.region, "bbox", ()) or ()),
                     region.region.source_id,
                     " | ".join(region.warnings),
                 ),

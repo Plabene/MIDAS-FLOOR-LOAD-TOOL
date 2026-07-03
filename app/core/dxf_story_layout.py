@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from math import hypot
 from pathlib import Path
 from statistics import median
 from typing import Iterable, Sequence
 import json
 
+import ezdxf
 from shapely.affinity import affine_transform
 from shapely.geometry import Polygon
 
@@ -215,12 +217,16 @@ def find_layout_metadata_path(
     *,
     mapping_path: str | Path | None = None,
     search_dirs: Sequence[str | Path] | None = None,
+    project_dxf_templates_dir: str | Path | None = None,
 ) -> Path | None:
+    extra_search_dirs = list(search_dirs or [])
+    if project_dxf_templates_dir:
+        extra_search_dirs.append(project_dxf_templates_dir)
     return _find_template_artifact_path(
         dxf_path,
         suffix=".layout_metadata.json",
         mapping_path=mapping_path,
-        search_dirs=search_dirs,
+        search_dirs=extra_search_dirs,
     )
 
 
@@ -263,6 +269,10 @@ def read_layout_metadata(path: str | Path) -> list[StoryLayout]:
     return layouts_from_metadata(json.loads(p.read_text(encoding="utf-8")))
 
 
+def load_story_layout_metadata(path: str | Path) -> list[StoryLayout]:
+    return read_layout_metadata(path)
+
+
 def _find_template_artifact_path(
     dxf_path: str | Path,
     *,
@@ -290,7 +300,22 @@ def _find_template_artifact_path(
             except OSError:
                 continue
     if not matches:
-        return None
+        matches = _all_story_template_artifact_candidates(dirs, suffix)
+        if not matches:
+            return None
+        if len(matches) > 1 and suffix == ".layout_metadata.json":
+            selected = _choose_layout_metadata_by_story_labels(dxf, matches)
+            if selected:
+                return selected
+            if _read_story_labels_from_dxf(dxf):
+                raise RuntimeError(
+                    "전층 DXF layout metadata 후보가 여러 개라 자동 선택할 수 없습니다. "
+                    "DXF 검증 전에 해당 template의 layout_metadata.json을 명시해 주세요."
+                )
+    if len(matches) > 1 and suffix == ".layout_metadata.json":
+        selected = _choose_layout_metadata_by_story_labels(dxf, matches)
+        if selected:
+            return selected
     matches.sort(key=lambda path: (len(path.stem), str(path).lower()))
     return matches[0]
 
@@ -342,6 +367,99 @@ def _candidate_template_stems(stem: str) -> list[str]:
             candidates.append(template_stem)
 
     return candidates
+
+
+def _all_story_template_artifact_candidates(dirs: Sequence[Path], suffix: str) -> list[Path]:
+    matches: list[Path] = []
+    seen: set[str] = set()
+    for directory in dirs:
+        if not directory.exists():
+            continue
+        try:
+            candidates = [path for path in directory.glob(f"*{suffix}") if path.is_file()]
+        except OSError:
+            continue
+        for path in candidates:
+            lower_name = path.name.lower()
+            if "all_stories" not in lower_name and "all_story" not in lower_name:
+                continue
+            if "floorload_template" not in lower_name:
+                continue
+            key = str(path.resolve()).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            matches.append(path)
+    matches.sort(key=lambda path: str(path).lower())
+    return matches
+
+
+def _choose_layout_metadata_by_story_labels(dxf_path: Path, candidates: Sequence[Path]) -> Path | None:
+    labels = _read_story_labels_from_dxf(dxf_path)
+    if not labels:
+        return None
+    scored: list[tuple[int, float, Path]] = []
+    for candidate in candidates:
+        layouts = read_layout_metadata(candidate)
+        if not layouts:
+            continue
+        layout_by_name = {_normalize_story_label(layout.story_name): layout for layout in layouts if layout.story_name}
+        match_count = 0
+        distance_sum = 0.0
+        for text, x, y in labels:
+            layout = layout_by_name.get(_normalize_story_label(text))
+            if not layout:
+                continue
+            tolerance = max(float(layout.text_height or 0.25) * 8.0, layout.placed_bbox.width * 0.02, 0.5)
+            distance = hypot(float(layout.label_x) - x, float(layout.label_y) - y)
+            if distance <= tolerance:
+                match_count += 1
+                distance_sum += distance
+        if match_count:
+            scored.append((match_count, distance_sum, candidate))
+    if not scored:
+        return None
+    scored.sort(key=lambda item: (-item[0], item[1], str(item[2]).lower()))
+    best = scored[0]
+    if len(scored) > 1:
+        second = scored[1]
+        if best[0] == second[0] and abs(best[1] - second[1]) <= 1.0e-6:
+            return None
+    return best[2]
+
+
+def _read_story_labels_from_dxf(dxf_path: Path) -> list[tuple[str, float, float]]:
+    try:
+        doc = ezdxf.readfile(str(dxf_path))
+    except Exception:
+        return []
+    labels: list[tuple[str, float, float]] = []
+    for entity in doc.modelspace():
+        if entity.dxftype() not in {"TEXT", "MTEXT"}:
+            continue
+        layer = str(getattr(entity.dxf, "layer", "") or "").upper()
+        if layer != "STORY_LABEL":
+            continue
+        text = _entity_text(entity)
+        if not text:
+            continue
+        insert = getattr(entity.dxf, "insert", None)
+        if insert is None:
+            continue
+        labels.append((text, float(insert.x), float(insert.y)))
+    return labels
+
+
+def _entity_text(entity) -> str:
+    if entity.dxftype() == "MTEXT":
+        text = str(getattr(entity, "text", "") or "")
+    else:
+        text = str(getattr(entity.dxf, "text", "") or "")
+    return " ".join(text.replace("\\P", " ").split()).strip()
+
+
+def _normalize_story_label(value: object) -> str:
+    return "".join(str(value or "").split()).upper()
 
 
 def _bbox_from_bounds(bounds) -> BBox2D:

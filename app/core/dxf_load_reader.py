@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from math import atan, atan2, cos, degrees, hypot, pi, radians, sin, sqrt
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -67,6 +67,7 @@ class HatchRegion:
     placed_vertices: list[Point2D] = field(default_factory=list)
     placed_bbox: tuple[float, ...] = field(default_factory=tuple)
     source_bbox: tuple[float, ...] = field(default_factory=tuple)
+    model_bbox: tuple[float, ...] = field(default_factory=tuple)
     transform_applied: bool = False
 
     def to_record(self) -> dict:
@@ -90,6 +91,7 @@ class HatchRegion:
             "layout_metadata_path": self.layout_metadata_path,
             "placed_bbox": self.placed_bbox,
             "source_bbox": self.source_bbox,
+            "model_bbox": self.model_bbox,
             "transform_applied": self.transform_applied,
         }
 
@@ -169,23 +171,7 @@ def _with_direction_markers(region: HatchRegion, markers: Sequence[DirectionMark
     matched = [marker for marker in markers if _direction_marker_matches_polygon(marker, region.polygon)]
     if not matched:
         return region
-    return HatchRegion(
-        source_type=region.source_type,
-        layer=region.layer,
-        handle=region.handle,
-        vertices=region.vertices,
-        polygon=region.polygon,
-        area=region.area,
-        bbox=region.bbox,
-        warnings=region.warnings,
-        story_name=region.story_name,
-        source_id=region.source_id,
-        polygon_index=region.polygon_index,
-        hatch_index=region.hatch_index,
-        hatch_pattern_name=region.hatch_pattern_name,
-        hatch_solid_fill=region.hatch_solid_fill,
-        direction_markers=matched,
-    )
+    return replace(region, direction_markers=matched)
 
 
 def _direction_marker_matches_polygon(marker: DirectionMarker, polygon: Polygon) -> bool:
@@ -555,18 +541,24 @@ def read_load_regions(
     *,
     mapping_path: str | Path | None = None,
     layout_metadata_path: str | Path | None = None,
+    project_dxf_templates_dir: str | Path | None = None,
     metadata_search_dirs: Sequence[str | Path] | None = None,
     include_closed_polylines: bool = True,
     tessellation_segments: int = 16,
     min_area: float = 1.0e-9,
 ) -> list[LoadRegion]:
     dxf = Path(dxf_path)
-    search_dirs = tuple(metadata_search_dirs or ())
+    search_dirs = tuple([*(metadata_search_dirs or ()), *([project_dxf_templates_dir] if project_dxf_templates_dir else [])])
     mapping_source = Path(mapping_path) if mapping_path else find_layer_mapping_path(dxf, search_dirs=search_dirs)
     metadata_source = (
         Path(layout_metadata_path)
         if layout_metadata_path
-        else find_layout_metadata_path(dxf, mapping_path=mapping_source, search_dirs=search_dirs)
+        else find_layout_metadata_path(
+            dxf,
+            mapping_path=mapping_source,
+            search_dirs=search_dirs,
+            project_dxf_templates_dir=project_dxf_templates_dir,
+        )
     )
     mapping = _load_layer_mapping(mapping_source)
     story_layouts = read_layout_metadata(metadata_source) if metadata_source else []
@@ -632,6 +624,7 @@ def _region_with_story_layout(region: HatchRegion, story_layouts, metadata_path:
             placed_vertices=list(region.vertices),
             placed_bbox=tuple(float(v) for v in region.bbox),
             source_bbox=tuple(float(v) for v in region.bbox),
+            model_bbox=tuple(float(v) for v in region.bbox),
             transform_applied=False,
         )
     placed_vertices = list(region.vertices)
@@ -660,6 +653,7 @@ def _region_with_story_layout(region: HatchRegion, story_layouts, metadata_path:
         placed_vertices=placed_vertices,
         placed_bbox=placed_bbox,
         source_bbox=tuple(float(v) for v in polygon.bounds),
+        model_bbox=tuple(float(v) for v in polygon.bounds),
         transform_applied=True,
     )
 

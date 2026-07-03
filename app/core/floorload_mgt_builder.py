@@ -54,6 +54,7 @@ class FloorLoadAssignment:
     layout_metadata_path: str = ""
     placed_bbox: tuple[float, ...] = ()
     source_bbox: tuple[float, ...] = ()
+    model_bbox: tuple[float, ...] = ()
     transform_applied: bool = False
     snap_before_transform: float | None = None
     snap_after_transform: float | None = None
@@ -76,6 +77,7 @@ class FloorLoadAssignment:
             "layout_metadata_path": self.layout_metadata_path,
             "placed_bbox": _format_bbox(self.placed_bbox),
             "source_bbox": _format_bbox(self.source_bbox),
+            "model_bbox": _format_bbox(self.model_bbox),
             "transform_applied": "YES" if self.transform_applied else "NO",
             "snap_before_transform": _format_optional_float(self.snap_before_transform),
             "snap_after_transform": _format_optional_float(self.snap_after_transform),
@@ -113,6 +115,7 @@ def build_assignments_from_regions(
         layout_metadata_path = str(getattr(region.region, "layout_metadata_path", "") or "")
         placed_bbox = tuple(getattr(region.region, "placed_bbox", ()) or ())
         source_bbox = tuple(getattr(region.region, "source_bbox", ()) or getattr(region.region, "bbox", ()) or ())
+        model_bbox = tuple(getattr(region.region, "model_bbox", ()) or getattr(region.region, "bbox", ()) or ())
         transform_applied = bool(getattr(region.region, "transform_applied", False))
         if region.load is None:
             assignments.append(
@@ -135,6 +138,7 @@ def build_assignments_from_regions(
                     layout_metadata_path=layout_metadata_path,
                     placed_bbox=placed_bbox,
                     source_bbox=source_bbox,
+                    model_bbox=model_bbox,
                     transform_applied=transform_applied,
                 )
             )
@@ -161,11 +165,43 @@ def build_assignments_from_regions(
                     layout_metadata_path=layout_metadata_path,
                     placed_bbox=placed_bbox,
                     source_bbox=source_bbox,
+                    model_bbox=model_bbox,
                     transform_applied=transform_applied,
                 )
             )
             continue
-        nodes_for_region = story_nodes_by_name.get(region_story, story_nodes) if story_nodes_by_name else story_nodes
+        if region_story and story_nodes_by_name is not None:
+            nodes_for_region = story_nodes_by_name.get(region_story)
+            if not nodes_for_region:
+                warnings.append(f"DXF Story '{region_story}'에 해당하는 모델 node set을 찾지 못했습니다.")
+                assignments.append(
+                    FloorLoadAssignment(
+                        load_type_name=region.load.real_name,
+                        dl=region.load.dl,
+                        ll=region.load.ll,
+                        node_ids=tuple(),
+                        source_layer=region.region.layer,
+                        source_type=region.region.source_type,
+                        area=region.area,
+                        status="STORY_NODE_SET_MISSING",
+                        warnings=tuple(warnings),
+                        story_name=region_story,
+                        source_id=region_source_id,
+                        polygon_index=region_polygon_index,
+                        hatch_pattern_name=region_hatch_pattern,
+                        hatch_solid_fill=region_hatch_solid,
+                        layout_metadata_used=layout_metadata_used,
+                        layout_metadata_path=layout_metadata_path,
+                        placed_bbox=placed_bbox,
+                        source_bbox=source_bbox,
+                        model_bbox=model_bbox,
+                        transform_applied=transform_applied,
+                        snap_max_error=math.inf,
+                    )
+                )
+                continue
+        else:
+            nodes_for_region = story_nodes
         snap_before_transform = None
         placed_vertices = tuple(getattr(region.region, "placed_vertices", ()) or ())
         if transform_applied and placed_vertices:
@@ -214,6 +250,7 @@ def build_assignments_from_regions(
                 layout_metadata_path=layout_metadata_path,
                 placed_bbox=placed_bbox,
                 source_bbox=source_bbox,
+                model_bbox=model_bbox,
                 transform_applied=transform_applied,
                 snap_before_transform=snap_before_transform,
                 snap_after_transform=snap_after_transform,
@@ -312,6 +349,7 @@ def write_reports(
                 "layout_metadata_path": item.layout_metadata_path,
                 "placed_bbox": _format_bbox(item.placed_bbox),
                 "source_bbox": _format_bbox(item.source_bbox),
+                "model_bbox": _format_bbox(item.model_bbox),
                 "transform_applied": "YES" if item.transform_applied else "NO",
                 "snap_before_transform": _format_optional_float(item.snap_before_transform),
                 "snap_after_transform": _format_optional_float(item.snap_after_transform),
@@ -391,7 +429,8 @@ def run_mgt_build_pipeline(
         include_zero_load=include_zero_load,
     )
     xlsx, csv_path = write_reports(assignments=assignments, output_dir=report_dir, model_name=model_name, story=story, dxf_name=dxf_name)
-    preview = write_assignment_preview_dxf(assignments, story_nodes, preview_dxf_path)
+    preview_nodes = _preview_nodes(story_nodes, story_nodes_by_name)
+    preview = write_assignment_preview_dxf(assignments, preview_nodes, preview_dxf_path)
     valid_assignments = [a for a in assignments if _is_assignment_recordable(a)]
     if not valid_assignments:
         raise RuntimeError(
@@ -425,6 +464,23 @@ def _snap_polygon_vertices_to_nodes(vertices: Sequence[tuple[float, float]], sto
             seen.add(best.node_id)
             node_ids.append(best.node_id)
     return node_ids, max_error
+
+
+def _preview_nodes(story_nodes: Sequence[Node], story_nodes_by_name: dict[str, Sequence[Node]] | None) -> list[Node]:
+    merged: list[Node] = []
+    seen: set[int] = set()
+    for node in story_nodes:
+        if node.node_id in seen:
+            continue
+        seen.add(node.node_id)
+        merged.append(node)
+    for nodes in (story_nodes_by_name or {}).values():
+        for node in nodes:
+            if node.node_id in seen:
+                continue
+            seen.add(node.node_id)
+            merged.append(node)
+    return merged
 
 
 def _logical_lines(lines: list[str]) -> list[str]:
