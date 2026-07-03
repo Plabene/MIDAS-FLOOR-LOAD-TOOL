@@ -10,6 +10,7 @@ import ezdxf
 from .load_parser import make_safe_load_layer_name
 from .mgt_parser import Element, Node, Story
 from .dxf_story_layout import BBox2D, bbox_from_points, plan_story_layouts, write_layout_metadata
+from .load_input_policy import DIRECTION_LAYERS
 
 
 @dataclass(frozen=True)
@@ -50,12 +51,7 @@ def write_story_centerline_dxf(
     doc.header["$INSUNITS"] = 6  # meter, if CAD honors it.
     korean_text_style = _ensure_korean_text_style(doc)
     msp = doc.modelspace()
-    _ensure_layer(doc, "CENTERLINE_COLUMN", color=2)
-    _ensure_layer(doc, "CENTERLINE_BEAM", color=7)
-    _ensure_layer(doc, "CENTERLINE_WALL", color=3)
-    _ensure_layer(doc, "REFERENCE_GRID", color=8)
-    _ensure_layer(doc, "LOAD_DL_0.0_LL_0.0", color=1)
-    _ensure_layer(doc, "FLOAD_GUIDE", color=6)
+    _ensure_template_layers(doc)
 
     element_count = 0
     warnings = 0
@@ -211,6 +207,9 @@ def _ensure_template_layers(doc) -> None:
     _ensure_layer(doc, "REFERENCE_GRID", color=8)
     _ensure_layer(doc, "LOAD_DL_0.0_LL_0.0", color=1)
     _ensure_layer(doc, "FLOAD_GUIDE", color=6)
+    for layer in DIRECTION_LAYERS:
+        _ensure_layer(doc, layer, color=1)
+    _ensure_layer(doc, "FLOAD_DIRECTION_GUIDE", color=3)
 
 
 def _load_layer_mapping_rows(load_layers: list[LoadLayerSpec]) -> list[dict]:
@@ -352,6 +351,15 @@ def _add_guide_text_below_geometry(msp, story: Story, bounds: list[float | None]
         "하중영역은 LOAD_* 레이어에 HATCH로 작성하세요. HATCH 실패 시 폐합 LWPOLYLINE을 fallback으로 읽습니다.",
         dxfattribs={"layer": "FLOAD_GUIDE", "height": note_height, "style": korean_text_style},
     ).set_placement((base_x, base_y - max(title_height * 1.5, note_height * 2.0, 0.5)))
+    line_gap = max(title_height * 1.5, note_height * 2.0, 0.5)
+    msp.add_text(
+        "TWO WAY: use SOLID HATCH or LOAD_*_TW. ONE WAY: use non-SOLID HATCH or LOAD_*_OW.",
+        dxfattribs={"layer": "FLOAD_GUIDE", "height": note_height, "style": korean_text_style},
+    ).set_placement((base_x, base_y - line_gap * 2.0))
+    msp.add_text(
+        "ONE WAY main direction is the short-span direction. Draw a short override line inside the hatch on ONE WAY SLAB DIRECTION only when needed.",
+        dxfattribs={"layer": "FLOAD_GUIDE", "height": note_height, "style": korean_text_style},
+    ).set_placement((base_x, base_y - line_gap * 3.0))
 
 
 def _add_column_marker(msp, xy: tuple[float, float], size: float = 0.25) -> None:

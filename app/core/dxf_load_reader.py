@@ -6,9 +6,10 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 import ezdxf
-from shapely.geometry import MultiPolygon, Polygon
+from shapely.geometry import LineString, MultiPolygon, Point, Polygon
 from shapely.geometry.polygon import orient
 from .dxf_story_layout import choose_story_layout_for_polygon, read_layout_metadata, transform_polygon
+from .load_input_policy import DIRECTION_LAYERS
 
 Point2D = tuple[float, float]
 
@@ -19,7 +20,23 @@ _TEMPLATE_REFERENCE_LAYERS = {
     "REFERENCE_GRID",
     "FLOAD_GUIDE",
     "STORY_LABEL",
+    *DIRECTION_LAYERS,
+    "FLOAD_DIRECTION_GUIDE",
 }
+
+
+@dataclass(frozen=True)
+class DirectionMarker:
+    source_type: str
+    layer: str
+    handle: str
+    start: Point2D
+    end: Point2D
+    source_id: str = ""
+
+    @property
+    def length(self) -> float:
+        return hypot(self.end[0] - self.start[0], self.end[1] - self.start[1])
 
 
 @dataclass
@@ -36,6 +53,9 @@ class HatchRegion:
     source_id: str = ""
     polygon_index: int = 0
     hatch_index: int = 0
+    hatch_pattern_name: str = ""
+    hatch_solid_fill: int = 0
+    direction_markers: list[DirectionMarker] = field(default_factory=list)
 
     def to_record(self) -> dict:
         return {
@@ -50,6 +70,10 @@ class HatchRegion:
             "source_id": self.source_id,
             "polygon_index": self.polygon_index,
             "hatch_index": self.hatch_index,
+            "hatch_pattern_name": self.hatch_pattern_name,
+            "hatch_solid_fill": self.hatch_solid_fill,
+            "direction_marker_count": len(self.direction_markers),
+            "direction_marker_source_ids": [marker.source_id for marker in self.direction_markers],
         }
 
 
@@ -62,6 +86,7 @@ def read_dxf_hatches(
 ) -> list[HatchRegion]:
     doc = ezdxf.readfile(str(dxf_path))
     regions: list[HatchRegion] = []
+    direction_markers = _read_direction_markers(doc.modelspace())
 
     hatch_index = 0
     for entity in doc.modelspace():
@@ -76,7 +101,90 @@ def read_dxf_hatches(
             if region is not None:
                 regions.append(region)
 
+    if direction_markers:
+        regions = [_with_direction_markers(region, direction_markers) for region in regions]
     return regions
+
+
+def _read_direction_markers(msp) -> list[DirectionMarker]:
+    markers: list[DirectionMarker] = []
+    for entity in msp:
+        layer = str(entity.dxf.layer)
+        if layer.upper() not in DIRECTION_LAYERS:
+            continue
+        marker = _direction_marker_from_entity(entity)
+        if marker is not None:
+            markers.append(marker)
+    return markers
+
+
+def _direction_marker_from_entity(entity) -> DirectionMarker | None:
+    dxftype = entity.dxftype()
+    start: Point2D | None = None
+    end: Point2D | None = None
+    if dxftype == "LINE":
+        start = _xy(entity.dxf.start)
+        end = _xy(entity.dxf.end)
+    elif dxftype == "LWPOLYLINE":
+        points = [(float(x), float(y)) for x, y, *_rest in entity.get_points("xy")]
+        if len(points) >= 2:
+            start = points[0]
+            end = points[-1]
+    elif dxftype == "POLYLINE":
+        points = [(float(v.dxf.location.x), float(v.dxf.location.y)) for v in entity.vertices]
+        if len(points) >= 2:
+            start = points[0]
+            end = points[-1]
+    if start is None or end is None:
+        return None
+    handle = str(entity.dxf.handle)
+    return DirectionMarker(
+        source_type=dxftype,
+        layer=str(entity.dxf.layer),
+        handle=handle,
+        start=start,
+        end=end,
+        source_id=handle,
+    )
+
+
+def _with_direction_markers(region: HatchRegion, markers: Sequence[DirectionMarker]) -> HatchRegion:
+    matched = [marker for marker in markers if _direction_marker_matches_polygon(marker, region.polygon)]
+    if not matched:
+        return region
+    return HatchRegion(
+        source_type=region.source_type,
+        layer=region.layer,
+        handle=region.handle,
+        vertices=region.vertices,
+        polygon=region.polygon,
+        area=region.area,
+        bbox=region.bbox,
+        warnings=region.warnings,
+        story_name=region.story_name,
+        source_id=region.source_id,
+        polygon_index=region.polygon_index,
+        hatch_index=region.hatch_index,
+        hatch_pattern_name=region.hatch_pattern_name,
+        hatch_solid_fill=region.hatch_solid_fill,
+        direction_markers=matched,
+    )
+
+
+def _direction_marker_matches_polygon(marker: DirectionMarker, polygon: Polygon) -> bool:
+    if polygon.is_empty:
+        return False
+    line = LineString([marker.start, marker.end])
+    midpoint = Point((marker.start[0] + marker.end[0]) / 2.0, (marker.start[1] + marker.end[1]) / 2.0)
+    start = Point(marker.start)
+    end = Point(marker.end)
+    if polygon.covers(midpoint) or polygon.covers(start) or polygon.covers(end):
+        return True
+    if line.intersects(polygon):
+        return True
+    min_x, min_y, max_x, max_y = polygon.bounds
+    diagonal = max(hypot(max_x - min_x, max_y - min_y), 1.0)
+    return polygon.distance(midpoint) <= diagonal * 1.0e-6
 
 
 def _regions_from_hatch(entity, tessellation_segments: int, min_area: float, hatch_index: int = 0) -> list[HatchRegion]:
@@ -100,6 +208,8 @@ def _regions_from_hatch(entity, tessellation_segments: int, min_area: float, hat
 
     regions: list[HatchRegion] = []
     handle = str(entity.dxf.handle)
+    pattern_name = str(getattr(entity.dxf, "pattern_name", "") or "").upper()
+    solid_fill = int(getattr(entity.dxf, "solid_fill", 0) or 0)
     for polygon_index, polygon in enumerate(polygons, start=1):
         exterior = list(polygon.exterior.coords)[:-1]
         regions.append(
@@ -115,6 +225,8 @@ def _regions_from_hatch(entity, tessellation_segments: int, min_area: float, hat
                 source_id=f"{handle}:{polygon_index}",
                 polygon_index=polygon_index,
                 hatch_index=hatch_index,
+                hatch_pattern_name=pattern_name,
+                hatch_solid_fill=solid_fill,
             )
         )
     return regions
@@ -149,6 +261,7 @@ def _region_from_closed_polyline(entity, tessellation_segments: int, min_area: f
         area=float(polygon.area),
         bbox=tuple(float(v) for v in polygon.bounds),
         warnings=[],
+        source_id=str(entity.dxf.handle),
     )
 
 
@@ -410,6 +523,10 @@ class LoadRegion:
                 "story_name": self.region.story_name,
                 "source_id": self.region.source_id,
                 "polygon_index": self.region.polygon_index,
+                "hatch_pattern_name": self.region.hatch_pattern_name,
+                "hatch_solid_fill": self.region.hatch_solid_fill,
+                "direction_marker_count": len(self.region.direction_markers),
+                "direction_marker_source_ids": [marker.source_id for marker in self.region.direction_markers],
                 "warnings": list(self.warnings),
             }
         )
@@ -478,9 +595,13 @@ def _region_with_story_layout(region: HatchRegion, story_layouts) -> HatchRegion
             source_id=region.source_id,
             polygon_index=region.polygon_index,
             hatch_index=region.hatch_index,
+            hatch_pattern_name=region.hatch_pattern_name,
+            hatch_solid_fill=region.hatch_solid_fill,
+            direction_markers=region.direction_markers,
         )
     polygon = transform_polygon(region.polygon, layout.inverse_transform)
     exterior = [(float(x), float(y)) for x, y in list(polygon.exterior.coords)[:-1]]
+    direction_markers = [_transform_direction_marker(marker, layout.inverse_transform) for marker in region.direction_markers]
     return HatchRegion(
         source_type=region.source_type,
         layer=region.layer,
@@ -494,6 +615,20 @@ def _region_with_story_layout(region: HatchRegion, story_layouts) -> HatchRegion
         source_id=region.source_id,
         polygon_index=region.polygon_index,
         hatch_index=region.hatch_index,
+        hatch_pattern_name=region.hatch_pattern_name,
+        hatch_solid_fill=region.hatch_solid_fill,
+        direction_markers=direction_markers,
+    )
+
+
+def _transform_direction_marker(marker: DirectionMarker, transform) -> DirectionMarker:
+    return DirectionMarker(
+        source_type=marker.source_type,
+        layer=marker.layer,
+        handle=marker.handle,
+        start=transform.apply(*marker.start),
+        end=transform.apply(*marker.end),
+        source_id=marker.source_id,
     )
 
 

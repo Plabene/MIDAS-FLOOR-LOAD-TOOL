@@ -18,6 +18,12 @@ from shapely.geometry import Polygon
 
 if TYPE_CHECKING:
     from .dxf_load_reader import LoadRegion
+from .load_input_policy import (
+    ERROR_ONE_WAY_REQUIRES_TRI_OR_QUAD,
+    ERROR_TOO_FEW_NODES,
+    SNAP_ERROR_EXCEEDED,
+    build_load_input_policy,
+)
 from .mgt_parser import Node, Story, read_text, write_text
 
 
@@ -35,6 +41,15 @@ class FloorLoadAssignment:
     story_name: str = ""
     source_id: str = ""
     polygon_index: int = 0
+    distribution: str = "TWO_WAY"
+    distribution_source: str = ""
+    effective_idist: int = 2
+    allow_polygon_type: bool = True
+    one_way_angle_deg: float | None = None
+    direction_source: str = ""
+    direction_marker_source_id: str = ""
+    hatch_pattern_name: str = ""
+    hatch_solid_fill: int = 0
 
     def to_record(self) -> dict:
         return {
@@ -75,6 +90,8 @@ def build_assignments_from_regions(
         region_story = getattr(region.region, "story_name", "")
         region_source_id = getattr(region.region, "source_id", "")
         region_polygon_index = int(getattr(region.region, "polygon_index", 0) or 0)
+        region_hatch_pattern = getattr(region.region, "hatch_pattern_name", "")
+        region_hatch_solid = int(getattr(region.region, "hatch_solid_fill", 0) or 0)
         if region.load is None:
             assignments.append(
                 FloorLoadAssignment(
@@ -90,6 +107,8 @@ def build_assignments_from_regions(
                     story_name=region_story,
                     source_id=region_source_id,
                     polygon_index=region_polygon_index,
+                    hatch_pattern_name=region_hatch_pattern,
+                    hatch_solid_fill=region_hatch_solid,
                 )
             )
             continue
@@ -109,19 +128,28 @@ def build_assignments_from_regions(
                     story_name=region_story,
                     source_id=region_source_id,
                     polygon_index=region_polygon_index,
+                    hatch_pattern_name=region_hatch_pattern,
+                    hatch_solid_fill=region_hatch_solid,
                 )
             )
             continue
         nodes_for_region = story_nodes_by_name.get(region_story, story_nodes) if story_nodes_by_name else story_nodes
         node_ids, max_error = _snap_polygon_vertices_to_nodes(region.region.vertices, nodes_for_region)
+        node_lookup = {node.node_id: node for node in nodes_for_region}
+        snapped_points = [(node_lookup[node_id].x, node_lookup[node_id].y) for node_id in node_ids if node_id in node_lookup]
+        policy = build_load_input_policy(region=region.region, load=region.load, snapped_points=snapped_points)
+        warnings.extend(policy.warnings)
         if len(node_ids) < 3:
             warnings.append("해치 경계에 대응되는 절점이 3개 미만입니다. Story 선택 또는 CAD 좌표계를 확인하세요.")
-            status = "BOUNDARY_NODE_COUNT_TOO_LOW"
+            status = ERROR_TOO_FEW_NODES
         elif max_error > snap_tolerance:
             warnings.append(f"최대 snap 오차 {max_error:.6g}이 허용값 {snap_tolerance:.6g}을 초과했습니다.")
-            status = "SNAP_ERROR_EXCEEDED"
+            status = SNAP_ERROR_EXCEEDED
+        elif policy.errors:
+            status = policy.errors[0]
+            warnings.extend(_policy_error_messages(policy.errors, len(node_ids)))
         else:
-            status = "OK" if not warnings else "REVIEW"
+            status = "OK" if not warnings else _review_status(warnings)
         assignments.append(
             FloorLoadAssignment(
                 load_type_name=region.load.real_name,
@@ -136,9 +164,39 @@ def build_assignments_from_regions(
                 story_name=region_story,
                 source_id=region_source_id,
                 polygon_index=region_polygon_index,
+                distribution=policy.distribution,
+                distribution_source=policy.distribution_source,
+                effective_idist=policy.effective_idist,
+                allow_polygon_type=policy.allow_polygon_type,
+                one_way_angle_deg=policy.one_way_angle_deg,
+                direction_source=policy.direction_source,
+                direction_marker_source_id=policy.direction_marker_source_id,
+                hatch_pattern_name=region_hatch_pattern,
+                hatch_solid_fill=region_hatch_solid,
             )
         )
     return assignments
+
+
+def _policy_error_messages(errors: Sequence[str], node_count: int) -> list[str]:
+    messages: list[str] = []
+    if ERROR_ONE_WAY_REQUIRES_TRI_OR_QUAD in errors:
+        messages.append(
+            "ONE WAY 하중은 3각형 또는 4각형 영역에만 적용 가능합니다. "
+            f"현재 영역은 {node_count}개 절점으로 인식되었습니다. "
+            "CAD에서 해당 해치 영역을 3각형/4각형 단위로 분할하거나, TWO WAY 하중이면 SOLID 해치 또는 _TW 레이어를 사용하세요."
+        )
+    if ERROR_TOO_FEW_NODES in errors:
+        messages.append("FLOORLOAD 경계 절점이 3개 미만입니다. CAD 해치 경계와 모델 node/snap tolerance를 확인하세요.")
+    return messages
+
+
+def _review_status(warnings: Sequence[str]) -> str:
+    for warning in warnings:
+        text = str(warning)
+        if text.startswith("REVIEW_") or text.startswith("AMBIGUOUS_"):
+            return text
+    return "REVIEW"
 
 
 def patch_full_mgt_with_floorloads(
@@ -155,7 +213,7 @@ def patch_full_mgt_with_floorloads(
 
 
 def patch_full_mgt_text(text: str, *, assignments: Sequence[FloorLoadAssignment], mode: str = "append") -> str:
-    valid = [a for a in assignments if a.status in {"OK", "REVIEW"} and len(a.node_ids) >= 3]
+    valid = [a for a in assignments if _is_assignment_recordable(a)]
     lines = _logical_lines(text.splitlines())
     if mode.lower() in {"overwrite", "replace"}:
         lines = _remove_sections(lines, {"*FLOADTYPE", "*FLOORLOAD"})
@@ -204,6 +262,18 @@ def write_reports(
                 "DXF Story": item.story_name,
                 "DXF source_id": item.source_id,
                 "DXF polygon_index": item.polygon_index,
+                "HATCH 패턴": item.hatch_pattern_name,
+                "SOLID 여부": "YES" if item.hatch_solid_fill else "NO",
+                "입력방식": item.distribution,
+                "입력방식 결정근거": item.distribution_source,
+                "최종 iDIST": item.effective_idist,
+                "Allow Polygon": "YES" if item.allow_polygon_type else "NO",
+                "절점수": len(item.node_ids),
+                "ONE WAY 주방향": "" if item.one_way_angle_deg is None else item.one_way_angle_deg,
+                "방향 산정 방식": item.direction_source,
+                "짧은 스팬 자동산정 여부": "YES" if item.direction_source.startswith("AUTO_SHORT_SPAN") else "NO",
+                "방향 override 여부": "YES" if item.direction_source in {"DXF_DIRECTION_MARKER", "LAYER_ANGLE_TOKEN", "USER_DEFAULT"} else "NO",
+                "방향선 source_id": item.direction_marker_source_id,
             }
         )
         row.update({"모델명": model_name, "Story명": story.name, "Story Elevation": story.elevation, "DXF 파일명": dxf_name})
@@ -272,7 +342,7 @@ def run_mgt_build_pipeline(
         report_xlsx_path=xlsx,
         report_csv_path=csv_path,
         preview_dxf_path=preview,
-        assignment_count=sum(1 for a in assignments if a.status in {"OK", "REVIEW"} and len(a.node_ids) >= 3),
+        assignment_count=sum(1 for a in assignments if _is_assignment_recordable(a)),
         warning_count=sum(len(a.warnings) + (0 if a.status == "OK" else 1) for a in assignments),
     )
 
@@ -434,16 +504,39 @@ def _make_floorload_records(assignments: Sequence[FloorLoadAssignment]) -> list[
     lines: list[str] = []
     for item in assignments:
         node_ids = tuple(getattr(item, "node_ids", ()) or ())
-        if len(node_ids) < 3:
+        if not _is_assignment_recordable(item):
             continue
         ltname = str(getattr(item, "load_type_name", "") or getattr(item, "load_real_name", "") or "").strip()
         if not ltname:
             continue
         node_text = ", ".join(str(int(n)) for n in node_ids)
         # 기존 MGT 샘플과 동일하게 Two Way(iDIST=2), GZ, bPROJ=NO, bAL=YES 형식 사용.
-        lines.append(f"   {_mgt_field(ltname)}, 2, 0, 0, 0, 0, GZ, NO, , NO, YES, , {node_text}")
+        idist = int(getattr(item, "effective_idist", 2) or 2)
+        if idist == 1:
+            angle = _fmt_angle(getattr(item, "one_way_angle_deg", 0.0) or 0.0)
+            lines.append(f"   {_mgt_field(ltname)}, 1, {angle}, 0, 0, 0, GZ, NO, , NO, YES, , {node_text}")
+        elif idist == 3:
+            lines.append(f"   {_mgt_field(ltname)}, 3, GZ, NO, , , {node_text}")
+        elif idist == 4:
+            lines.append(f"   {_mgt_field(ltname)}, 4, GZ, NO, , , {node_text}")
+        else:
+            lines.append(f"   {_mgt_field(ltname)}, 2, 0, 0, 0, 0, GZ, NO, , NO, YES, , {node_text}")
     _validate_floorload_records_do_not_reference_dxf(lines)
     return lines
+
+
+def _is_assignment_recordable(item: FloorLoadAssignment) -> bool:
+    status = str(getattr(item, "status", "") or "")
+    return (
+        (status == "OK" or status == "REVIEW" or status.startswith("REVIEW_"))
+        and len(tuple(getattr(item, "node_ids", ()) or ())) >= 3
+        and bool(str(getattr(item, "load_type_name", "") or "").strip())
+    )
+
+
+def _fmt_angle(value: float) -> str:
+    text = f"{float(value) % 360.0:.6f}".rstrip("0").rstrip(".")
+    return "0" if text in {"", "-0"} else text
 
 
 def _validate_patched_floorload_mgt(text: str) -> None:

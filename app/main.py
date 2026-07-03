@@ -13,6 +13,7 @@ from tkinter import filedialog, messagebox, ttk
 try:
     # package 실행: python -m app.main
     from .core.dxf_load_reader import read_load_regions
+    from .core.diagnostic_dxf_writer import write_floorload_diagnostic_dxf
     from .core.dxf_template_writer import LoadLayerSpec, write_all_story_centerline_dxf, write_story_centerline_dxf
     from .core.floorload_mgt_builder import run_mgt_build_pipeline
     from .core.load_selection import apply_load_display_names
@@ -32,6 +33,8 @@ try:
     )
     from .core.midas_api_client import MidasApiError, MidasGenApiClient
     from .core.load_parser import parse_load_layer
+    from .core.load_input_policy import infer_distribution
+    from .core.model_floorload_diagnostics import analyze_floorload_model, write_diagnostic_reports
     from .utils.config import AppConfig, load_config, save_config
     from .utils.logger import setup_logger
     from .utils.path_utils import (
@@ -47,6 +50,7 @@ except ImportError:  # 직접 실행: python app/main.py
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
     from app.core.dxf_load_reader import read_load_regions
+    from app.core.diagnostic_dxf_writer import write_floorload_diagnostic_dxf
     from app.core.dxf_template_writer import LoadLayerSpec, write_all_story_centerline_dxf, write_story_centerline_dxf
     from app.core.floorload_mgt_builder import run_mgt_build_pipeline
     from app.core.load_selection import apply_load_display_names
@@ -66,6 +70,8 @@ except ImportError:  # 직접 실행: python app/main.py
     )
     from app.core.midas_api_client import MidasApiError, MidasGenApiClient
     from app.core.load_parser import parse_load_layer
+    from app.core.load_input_policy import infer_distribution
+    from app.core.model_floorload_diagnostics import analyze_floorload_model, write_diagnostic_reports
     from app.utils.config import AppConfig, load_config, save_config
     from app.utils.logger import setup_logger
     from app.utils.path_utils import (
@@ -118,6 +124,9 @@ class FloorLoadAutoApp(tk.Tk):
         self.nodes = []
         self.elements = []
         self.loaded_regions = []
+        self.diagnostic_issues = []
+        self.last_diagnostic_dxf_path: Path | None = None
+        self.last_diagnostic_report_path: Path | None = None
         self.selected_pdf_paths: list[Path] = []
         self.pdf_import_result: PdfLoadImportResult | None = None
         self.model_load_items: list[dict] = []
@@ -287,6 +296,35 @@ class FloorLoadAutoApp(tk.Tk):
         self.story_tree.grid(row=8, column=1, sticky="nsew", padx=8, pady=8)
         f.rowconfigure(8, weight=1)
         self.story_tree.bind("<<TreeviewSelect>>", self.on_story_select)
+        diag_button_frame = ttk.Frame(f)
+        diag_button_frame.grid(row=9, column=1, columnspan=2, sticky="w", padx=8, pady=4)
+        ttk.Button(diag_button_frame, text="모델링 FLOORLOAD 입력 가능성 분석", command=self.run_floorload_diagnostics).pack(side="left", padx=4)
+        self.open_diag_dxf_button = ttk.Button(diag_button_frame, text="진단 DXF 열기", command=self.open_last_diagnostic_dxf)
+        self.open_diag_dxf_button.pack(side="left", padx=4)
+        self.open_diag_dxf_button.state(["disabled"])
+        self.open_diag_report_button = ttk.Button(diag_button_frame, text="진단 보고서 열기", command=self.open_last_diagnostic_report)
+        self.open_diag_report_button.pack(side="left", padx=4)
+        self.open_diag_report_button.state(["disabled"])
+        self.diagnostic_tree = ttk.Treeview(
+            f,
+            columns=("story", "severity", "type", "xy", "nodes", "elements", "message", "action"),
+            show="headings",
+            height=7,
+        )
+        for col, txt, width in (
+            ("story", "Story", 90),
+            ("severity", "심각도", 80),
+            ("type", "문제유형", 140),
+            ("xy", "위치 X,Y", 130),
+            ("nodes", "Node", 120),
+            ("elements", "Element", 120),
+            ("message", "추정 원인", 260),
+            ("action", "수정 안내", 260),
+        ):
+            self.diagnostic_tree.heading(col, text=txt)
+            self.diagnostic_tree.column(col, width=width)
+        self.diagnostic_tree.grid(row=10, column=0, columnspan=3, sticky="nsew", padx=8, pady=8)
+        f.rowconfigure(10, weight=1)
 
     def _build_pdf_tab(self) -> None:
         f = self.tab_pdf
@@ -414,7 +452,12 @@ class FloorLoadAutoApp(tk.Tk):
         ttk.Entry(f, textvariable=self.user_dxf_path).grid(row=5, column=1, sticky="ew", padx=8, pady=8)
         ttk.Button(f, text="찾기", command=self.select_user_dxf).grid(row=5, column=2, padx=8, pady=8)
         ttk.Button(f, text="DXF 검증", command=self.validate_user_dxf).grid(row=6, column=0, sticky="w", padx=8, pady=8)
-        self.dxf_tree = ttk.Treeview(f, columns=("status", "story", "source", "layer", "load", "dl", "ll", "area", "source_id", "warnings"), show="headings", height=12)
+        self.dxf_tree = ttk.Treeview(
+            f,
+            columns=("status", "story", "source", "layer", "pattern", "solid", "mode", "mode_source", "dir", "load", "dl", "ll", "area", "source_id", "warnings"),
+            show="headings",
+            height=12,
+        )
         for col, txt, width in (
             ("status", "상태", 120), ("source", "객체", 80), ("layer", "레이어", 220), ("load", "하중명", 140),
             ("dl", "DL", 80), ("ll", "LL", 80), ("area", "면적", 100), ("warnings", "경고", 300),
@@ -423,6 +466,15 @@ class FloorLoadAutoApp(tk.Tk):
             self.dxf_tree.column(col, width=width)
         self.dxf_tree.heading("story", text="Story")
         self.dxf_tree.column("story", width=90)
+        for col, txt, width in (
+            ("pattern", "HATCH", 95),
+            ("solid", "SOLID", 60),
+            ("mode", "입력방식", 110),
+            ("mode_source", "판정근거", 150),
+            ("dir", "방향선", 70),
+        ):
+            self.dxf_tree.heading(col, text=txt)
+            self.dxf_tree.column(col, width=width)
         self.dxf_tree.heading("source_id", text="source_id")
         self.dxf_tree.column("source_id", width=110)
         self.dxf_tree.grid(row=7, column=0, columnspan=3, sticky="nsew", padx=8, pady=8)
@@ -786,6 +838,31 @@ class FloorLoadAutoApp(tk.Tk):
 
         self.run_worker("DXF 검증", job)
 
+    def run_floorload_diagnostics(self) -> None:
+        if not self.nodes or not self.elements or not self.stories:
+            messagebox.showwarning("모델 데이터 없음", "먼저 API로 모델을 열거나 MGT/MGTX에서 Story, Node, Element를 읽어 주세요.")
+            return
+
+        def job():
+            self._ensure_current_project_workspace()
+            reports_dir = self.current_project_subdirs["reports"]
+            issues = analyze_floorload_model(
+                nodes=self.nodes,
+                elements=self.elements,
+                stories=self.stories,
+                planned_load_regions=self.loaded_regions,
+                story_tolerance=float(self.story_tol_var.get()),
+                snap_tolerance=float(self.snap_tol_var.get() if hasattr(self, "snap_tol_var") else self.config_data.snap_tolerance),
+            )
+            json_path, csv_path = write_diagnostic_reports(issues, reports_dir)
+            dxf_path = write_floorload_diagnostic_dxf(output_path=reports_dir / "floorload_diagnostics_all.dxf", issues=issues)
+            self.last_diagnostic_dxf_path = dxf_path
+            self.last_diagnostic_report_path = csv_path
+            self.queue.put(("diagnostics", issues))
+            return f"FLOORLOAD 모델링 진단 완료: {len(issues)}개 이슈\nDXF: {dxf_path}\nCSV: {csv_path}\nJSON: {json_path}"
+
+        self.run_worker("FLOORLOAD 모델링 진단", job)
+
     def build_mgt_only(self) -> None:
         self._build_pipeline(import_to_midas=False)
 
@@ -1101,6 +1178,20 @@ class FloorLoadAutoApp(tk.Tk):
             self.logger.exception("failed to open generated DXF")
             messagebox.showerror("DXF 열기 실패", f"생성된 DXF 파일을 열지 못했습니다.\n\n{exc}")
 
+    def open_last_diagnostic_dxf(self) -> None:
+        path = self.last_diagnostic_dxf_path
+        if not path or not path.exists():
+            messagebox.showwarning("진단 DXF 없음", "먼저 모델링 FLOORLOAD 입력 가능성 분석을 실행해 주세요.")
+            return
+        self._open_path_with_default_app(path)
+
+    def open_last_diagnostic_report(self) -> None:
+        path = self.last_diagnostic_report_path
+        if not path or not path.exists():
+            messagebox.showwarning("진단 보고서 없음", "먼저 모델링 FLOORLOAD 입력 가능성 분석을 실행해 주세요.")
+            return
+        self._open_path_with_default_app(path)
+
     def _selected_story(self) -> Story | None:
         name = self.selected_story_name.get()
         for story in self.stories:
@@ -1175,6 +1266,8 @@ class FloorLoadAutoApp(tk.Tk):
                     self._refresh_story_tree(payload)
                 elif kind == "regions":
                     self._refresh_region_tree(payload)
+                elif kind == "diagnostics":
+                    self._refresh_diagnostic_tree(payload)
                 elif kind == "floorload_status":
                     self._update_floorload_status(payload)
                 elif kind == "model_load_items":
@@ -1229,6 +1322,7 @@ class FloorLoadAutoApp(tk.Tk):
             self.dxf_tree.delete(item)
         for region in regions:
             load = region.load
+            mode, mode_source = infer_distribution(region.region, load) if load else ("", "")
             self.dxf_tree.insert(
                 "",
                 "end",
@@ -1237,12 +1331,43 @@ class FloorLoadAutoApp(tk.Tk):
                     region.region.story_name,
                     region.region.source_type,
                     region.region.layer,
+                    region.region.hatch_pattern_name,
+                    "YES" if region.region.hatch_solid_fill else "NO",
+                    mode,
+                    mode_source,
+                    len(region.region.direction_markers),
                     load.real_name if load else "",
                     "" if not load else f"{load.dl:.2f}",
                     "" if not load else f"{load.ll:.2f}",
                     f"{region.area:.6g}",
                     region.region.source_id,
                     " | ".join(region.warnings),
+                ),
+            )
+
+    def _refresh_diagnostic_tree(self, issues) -> None:
+        self.diagnostic_issues = list(issues or [])
+        if hasattr(self, "open_diag_dxf_button") and self.last_diagnostic_dxf_path:
+            self.open_diag_dxf_button.state(["!disabled"])
+        if hasattr(self, "open_diag_report_button") and self.last_diagnostic_report_path:
+            self.open_diag_report_button.state(["!disabled"])
+        if not hasattr(self, "diagnostic_tree"):
+            return
+        for item in self.diagnostic_tree.get_children():
+            self.diagnostic_tree.delete(item)
+        for issue in self.diagnostic_issues:
+            self.diagnostic_tree.insert(
+                "",
+                "end",
+                values=(
+                    issue.story_name,
+                    issue.severity,
+                    issue.issue_type,
+                    f"{issue.x:.3f}, {issue.y:.3f}",
+                    ",".join(str(value) for value in issue.node_ids),
+                    ",".join(str(value) for value in issue.element_ids),
+                    issue.message,
+                    issue.suggested_action,
                 ),
             )
 
