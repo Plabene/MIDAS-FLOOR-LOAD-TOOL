@@ -8,7 +8,13 @@ from typing import Iterable, Sequence
 import ezdxf
 from shapely.geometry import LineString, MultiPolygon, Point, Polygon
 from shapely.geometry.polygon import orient
-from .dxf_story_layout import choose_story_layout_for_polygon, read_layout_metadata, transform_polygon
+from .dxf_story_layout import (
+    choose_story_layout_for_polygon,
+    find_layer_mapping_path,
+    find_layout_metadata_path,
+    read_layout_metadata,
+    transform_polygon,
+)
 from .load_input_policy import DIRECTION_LAYERS
 
 Point2D = tuple[float, float]
@@ -56,6 +62,12 @@ class HatchRegion:
     hatch_pattern_name: str = ""
     hatch_solid_fill: int = 0
     direction_markers: list[DirectionMarker] = field(default_factory=list)
+    layout_metadata_used: bool = False
+    layout_metadata_path: str = ""
+    placed_vertices: list[Point2D] = field(default_factory=list)
+    placed_bbox: tuple[float, ...] = field(default_factory=tuple)
+    source_bbox: tuple[float, ...] = field(default_factory=tuple)
+    transform_applied: bool = False
 
     def to_record(self) -> dict:
         return {
@@ -74,6 +86,11 @@ class HatchRegion:
             "hatch_solid_fill": self.hatch_solid_fill,
             "direction_marker_count": len(self.direction_markers),
             "direction_marker_source_ids": [marker.source_id for marker in self.direction_markers],
+            "layout_metadata_used": self.layout_metadata_used,
+            "layout_metadata_path": self.layout_metadata_path,
+            "placed_bbox": self.placed_bbox,
+            "source_bbox": self.source_bbox,
+            "transform_applied": self.transform_applied,
         }
 
 
@@ -537,12 +554,24 @@ def read_load_regions(
     dxf_path: str | Path,
     *,
     mapping_path: str | Path | None = None,
+    layout_metadata_path: str | Path | None = None,
+    metadata_search_dirs: Sequence[str | Path] | None = None,
     include_closed_polylines: bool = True,
     tessellation_segments: int = 16,
     min_area: float = 1.0e-9,
 ) -> list[LoadRegion]:
-    mapping = _load_layer_mapping(mapping_path)
-    story_layouts = read_layout_metadata(Path(dxf_path).with_suffix(".layout_metadata.json"))
+    dxf = Path(dxf_path)
+    search_dirs = tuple(metadata_search_dirs or ())
+    mapping_source = Path(mapping_path) if mapping_path else find_layer_mapping_path(dxf, search_dirs=search_dirs)
+    metadata_source = (
+        Path(layout_metadata_path)
+        if layout_metadata_path
+        else find_layout_metadata_path(dxf, mapping_path=mapping_source, search_dirs=search_dirs)
+    )
+    mapping = _load_layer_mapping(mapping_source)
+    story_layouts = read_layout_metadata(metadata_source) if metadata_source else []
+    if _looks_like_all_story_dxf(dxf) and not story_layouts:
+        raise RuntimeError(_missing_all_story_metadata_message())
     raw_regions = read_dxf_hatches(
         dxf_path,
         include_closed_polylines=include_closed_polylines,
@@ -552,7 +581,7 @@ def read_load_regions(
     regions: list[LoadRegion] = []
     for region in raw_regions:
         if story_layouts:
-            region = _region_with_story_layout(region, story_layouts)
+            region = _region_with_story_layout(region, story_layouts, metadata_source)
         warnings = list(region.warnings)
         warnings.extend(validate_polygon(region.polygon, min_area=min_area))
         try:
@@ -576,7 +605,7 @@ def read_load_regions(
     return regions
 
 
-def _region_with_story_layout(region: HatchRegion, story_layouts) -> HatchRegion:
+def _region_with_story_layout(region: HatchRegion, story_layouts, metadata_path: Path | None) -> HatchRegion:
     layout, warning = choose_story_layout_for_polygon(region.polygon, story_layouts)
     warnings = list(region.warnings)
     if warning:
@@ -598,7 +627,15 @@ def _region_with_story_layout(region: HatchRegion, story_layouts) -> HatchRegion
             hatch_pattern_name=region.hatch_pattern_name,
             hatch_solid_fill=region.hatch_solid_fill,
             direction_markers=region.direction_markers,
+            layout_metadata_used=metadata_path is not None,
+            layout_metadata_path=str(metadata_path or ""),
+            placed_vertices=list(region.vertices),
+            placed_bbox=tuple(float(v) for v in region.bbox),
+            source_bbox=tuple(float(v) for v in region.bbox),
+            transform_applied=False,
         )
+    placed_vertices = list(region.vertices)
+    placed_bbox = tuple(float(v) for v in region.bbox)
     polygon = transform_polygon(region.polygon, layout.inverse_transform)
     exterior = [(float(x), float(y)) for x, y in list(polygon.exterior.coords)[:-1]]
     direction_markers = [_transform_direction_marker(marker, layout.inverse_transform) for marker in region.direction_markers]
@@ -618,6 +655,12 @@ def _region_with_story_layout(region: HatchRegion, story_layouts) -> HatchRegion
         hatch_pattern_name=region.hatch_pattern_name,
         hatch_solid_fill=region.hatch_solid_fill,
         direction_markers=direction_markers,
+        layout_metadata_used=metadata_path is not None,
+        layout_metadata_path=str(metadata_path or ""),
+        placed_vertices=placed_vertices,
+        placed_bbox=placed_bbox,
+        source_bbox=tuple(float(v) for v in polygon.bounds),
+        transform_applied=True,
     )
 
 
@@ -648,3 +691,16 @@ def _load_layer_mapping(path: str | Path | None) -> dict[str, dict[str, _Any]]:
         with p.open("r", encoding="utf-8-sig", newline="") as f:
             return {str(row.get("layer")): row for row in _csv.DictReader(f) if row.get("layer")}
     return {}
+
+
+def _looks_like_all_story_dxf(path: Path) -> bool:
+    stem = path.stem.lower()
+    return "all_stories" in stem or "all_story" in stem
+
+
+def _missing_all_story_metadata_message() -> str:
+    return (
+        "전층 DXF layout metadata를 찾지 못했습니다.\n"
+        "전층 DXF는 층별 배치 offset을 제거해야 하므로 원본 template와 함께 생성된 layout_metadata.json이 필요합니다.\n"
+        "원본 DATA/OUTPUT/{프로젝트명}/dxf_templates 폴더의 metadata 파일을 확인하세요."
+    )

@@ -35,6 +35,18 @@ class BBox2D:
     def to_polygon(self) -> Polygon:
         return Polygon([(self.min_x, self.min_y), (self.max_x, self.min_y), (self.max_x, self.max_y), (self.min_x, self.max_y)])
 
+    def contains_point(self, x: float, y: float) -> bool:
+        return self.min_x <= float(x) <= self.max_x and self.min_y <= float(y) <= self.max_y
+
+    def overlap_area(self, other: "BBox2D") -> float:
+        min_x = max(self.min_x, other.min_x)
+        min_y = max(self.min_y, other.min_y)
+        max_x = min(self.max_x, other.max_x)
+        max_y = min(self.max_y, other.max_y)
+        if max_x <= min_x or max_y <= min_y:
+            return 0.0
+        return (max_x - min_x) * (max_y - min_y)
+
 
 @dataclass(frozen=True)
 class Affine2D:
@@ -166,20 +178,61 @@ def choose_story_layout_for_polygon(
     if not layouts or polygon.is_empty or polygon.area <= 1.0e-12:
         return None, "NO_STORY_LAYOUT"
 
-    scores: list[tuple[float, StoryLayout]] = []
+    rep = polygon.representative_point()
+    polygon_bbox = _bbox_from_bounds(polygon.bounds)
+    bbox_area = max(polygon_bbox.area, 1.0e-12)
+    scores: list[tuple[float, float, float, StoryLayout]] = []
     for layout in layouts:
         placed_poly = layout.placed_bbox.to_polygon()
         overlap = polygon.intersection(placed_poly).area
         ratio = overlap / max(polygon.area, 1.0e-12)
-        scores.append((ratio, layout))
-    scores.sort(key=lambda item: item[0], reverse=True)
+        point_score = 1.0 if layout.placed_bbox.contains_point(rep.x, rep.y) else 0.0
+        bbox_ratio = layout.placed_bbox.overlap_area(polygon_bbox) / bbox_area
+        scores.append((ratio, point_score, bbox_ratio, layout))
+    scores.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
 
-    best_ratio, best_layout = scores[0]
-    if best_ratio < min_overlap_ratio:
+    best_ratio, best_point_score, best_bbox_ratio, best_layout = scores[0]
+    if best_ratio < min_overlap_ratio and best_point_score <= 0.0:
+        return best_layout, "AMBIGUOUS_STORY"
+    if best_ratio <= 1.0e-12 and best_bbox_ratio <= 1.0e-12:
         return best_layout, "AMBIGUOUS_STORY"
     if len(scores) > 1 and best_ratio - scores[1][0] < ambiguous_delta and scores[1][0] > 1.0e-12:
         return best_layout, "AMBIGUOUS_STORY"
     return best_layout, None
+
+
+_USER_EDIT_SUFFIXES = (
+    "_사용자입력",
+    "_user_input",
+    "_edited",
+    "_작성",
+    "_수정본",
+)
+
+
+def find_layout_metadata_path(
+    dxf_path: str | Path,
+    *,
+    mapping_path: str | Path | None = None,
+    search_dirs: Sequence[str | Path] | None = None,
+) -> Path | None:
+    return _find_template_artifact_path(
+        dxf_path,
+        suffix=".layout_metadata.json",
+        mapping_path=mapping_path,
+        search_dirs=search_dirs,
+    )
+
+
+def find_layer_mapping_path(
+    dxf_path: str | Path,
+    *,
+    search_dirs: Sequence[str | Path] | None = None,
+) -> Path | None:
+    json_path = _find_template_artifact_path(dxf_path, suffix=".layer_mapping.json", search_dirs=search_dirs)
+    if json_path:
+        return json_path
+    return _find_template_artifact_path(dxf_path, suffix=".layer_mapping.csv", search_dirs=search_dirs)
 
 
 def metadata_from_layouts(layouts: Sequence[StoryLayout]) -> dict:
@@ -208,6 +261,92 @@ def read_layout_metadata(path: str | Path) -> list[StoryLayout]:
     if not p.exists():
         return []
     return layouts_from_metadata(json.loads(p.read_text(encoding="utf-8")))
+
+
+def _find_template_artifact_path(
+    dxf_path: str | Path,
+    *,
+    suffix: str,
+    mapping_path: str | Path | None = None,
+    search_dirs: Sequence[str | Path] | None = None,
+) -> Path | None:
+    dxf = Path(dxf_path)
+    dirs = _candidate_search_dirs(dxf, mapping_path=mapping_path, search_dirs=search_dirs)
+    stems = _candidate_template_stems(dxf.stem)
+
+    for directory in dirs:
+        for stem in stems:
+            candidate = directory / f"{stem}{suffix}"
+            if candidate.exists():
+                return candidate
+
+    matches: list[Path] = []
+    for directory in dirs:
+        if not directory.exists():
+            continue
+        for stem in stems[1:] + stems[:1]:
+            try:
+                matches.extend(path for path in directory.glob(f"{stem}*{suffix}") if path.is_file())
+            except OSError:
+                continue
+    if not matches:
+        return None
+    matches.sort(key=lambda path: (len(path.stem), str(path).lower()))
+    return matches[0]
+
+
+def _candidate_search_dirs(
+    dxf: Path,
+    *,
+    mapping_path: str | Path | None = None,
+    search_dirs: Sequence[str | Path] | None = None,
+) -> list[Path]:
+    raw_dirs: list[Path] = [dxf.parent]
+    if mapping_path:
+        raw_dirs.append(Path(mapping_path).parent)
+    raw_dirs.extend(Path(path) for path in (search_dirs or ()))
+
+    result: list[Path] = []
+    seen: set[str] = set()
+    for directory in raw_dirs:
+        resolved = directory.expanduser()
+        key = str(resolved).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(resolved)
+    return result
+
+
+def _candidate_template_stems(stem: str) -> list[str]:
+    candidates = [stem]
+    stripped = stem
+    changed = True
+    while changed:
+        changed = False
+        lower = stripped.lower()
+        for suffix in _USER_EDIT_SUFFIXES:
+            if lower.endswith(suffix.lower()):
+                stripped = stripped[: -len(suffix)]
+                if stripped and stripped not in candidates:
+                    candidates.append(stripped)
+                changed = True
+                break
+
+    marker = "_floorload_template"
+    lower_stem = stem.lower()
+    marker_index = lower_stem.find(marker)
+    if marker_index >= 0:
+        template_stem = stem[: marker_index + len(marker)]
+        if template_stem and template_stem not in candidates:
+            candidates.append(template_stem)
+
+    return candidates
+
+
+def _bbox_from_bounds(bounds) -> BBox2D:
+    min_x, min_y, max_x, max_y = bounds
+    return BBox2D(float(min_x), float(min_y), float(max_x), float(max_y))
 
 
 def _layout_to_dict(layout: StoryLayout) -> dict:

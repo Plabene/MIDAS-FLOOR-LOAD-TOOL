@@ -828,7 +828,12 @@ class FloorLoadAutoApp(tk.Tk):
             return
 
         def job():
-            regions = read_load_regions(dxf, mapping_path=self.mapping_path.get().strip() or None)
+            self._ensure_current_project_workspace()
+            regions = read_load_regions(
+                dxf,
+                mapping_path=self.mapping_path.get().strip() or None,
+                metadata_search_dirs=[self.current_project_subdirs["dxf_templates"]],
+            )
             self.loaded_regions = regions
             self.queue.put(("regions", regions))
             if not regions:
@@ -887,7 +892,11 @@ class FloorLoadAutoApp(tk.Tk):
 
         def job():
             self._ensure_current_project_workspace()
-            regions = self.loaded_regions or read_load_regions(dxf, mapping_path=self.mapping_path.get().strip() or None)
+            regions = self.loaded_regions or read_load_regions(
+                dxf,
+                mapping_path=self.mapping_path.get().strip() or None,
+                metadata_search_dirs=[self.current_project_subdirs["dxf_templates"]],
+            )
             story_nodes_by_name = None
             if any(getattr(region.region, "story_name", "") for region in regions):
                 story_nodes_by_name = {

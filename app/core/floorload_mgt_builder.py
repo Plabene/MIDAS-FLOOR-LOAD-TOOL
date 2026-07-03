@@ -50,6 +50,14 @@ class FloorLoadAssignment:
     direction_marker_source_id: str = ""
     hatch_pattern_name: str = ""
     hatch_solid_fill: int = 0
+    layout_metadata_used: bool = False
+    layout_metadata_path: str = ""
+    placed_bbox: tuple[float, ...] = ()
+    source_bbox: tuple[float, ...] = ()
+    transform_applied: bool = False
+    snap_before_transform: float | None = None
+    snap_after_transform: float | None = None
+    snap_max_error: float | None = None
 
     def to_record(self) -> dict:
         return {
@@ -63,6 +71,15 @@ class FloorLoadAssignment:
             "면적": self.area,
             "상태": self.status,
             "경고": " | ".join(self.warnings),
+            "DXF Story": self.story_name,
+            "layout_metadata_used": "YES" if self.layout_metadata_used else "NO",
+            "layout_metadata_path": self.layout_metadata_path,
+            "placed_bbox": _format_bbox(self.placed_bbox),
+            "source_bbox": _format_bbox(self.source_bbox),
+            "transform_applied": "YES" if self.transform_applied else "NO",
+            "snap_before_transform": _format_optional_float(self.snap_before_transform),
+            "snap_after_transform": _format_optional_float(self.snap_after_transform),
+            "snap_max_error": _format_optional_float(self.snap_max_error),
         }
 
 
@@ -92,6 +109,11 @@ def build_assignments_from_regions(
         region_polygon_index = int(getattr(region.region, "polygon_index", 0) or 0)
         region_hatch_pattern = getattr(region.region, "hatch_pattern_name", "")
         region_hatch_solid = int(getattr(region.region, "hatch_solid_fill", 0) or 0)
+        layout_metadata_used = bool(getattr(region.region, "layout_metadata_used", False))
+        layout_metadata_path = str(getattr(region.region, "layout_metadata_path", "") or "")
+        placed_bbox = tuple(getattr(region.region, "placed_bbox", ()) or ())
+        source_bbox = tuple(getattr(region.region, "source_bbox", ()) or getattr(region.region, "bbox", ()) or ())
+        transform_applied = bool(getattr(region.region, "transform_applied", False))
         if region.load is None:
             assignments.append(
                 FloorLoadAssignment(
@@ -109,6 +131,11 @@ def build_assignments_from_regions(
                     polygon_index=region_polygon_index,
                     hatch_pattern_name=region_hatch_pattern,
                     hatch_solid_fill=region_hatch_solid,
+                    layout_metadata_used=layout_metadata_used,
+                    layout_metadata_path=layout_metadata_path,
+                    placed_bbox=placed_bbox,
+                    source_bbox=source_bbox,
+                    transform_applied=transform_applied,
                 )
             )
             continue
@@ -130,11 +157,21 @@ def build_assignments_from_regions(
                     polygon_index=region_polygon_index,
                     hatch_pattern_name=region_hatch_pattern,
                     hatch_solid_fill=region_hatch_solid,
+                    layout_metadata_used=layout_metadata_used,
+                    layout_metadata_path=layout_metadata_path,
+                    placed_bbox=placed_bbox,
+                    source_bbox=source_bbox,
+                    transform_applied=transform_applied,
                 )
             )
             continue
         nodes_for_region = story_nodes_by_name.get(region_story, story_nodes) if story_nodes_by_name else story_nodes
+        snap_before_transform = None
+        placed_vertices = tuple(getattr(region.region, "placed_vertices", ()) or ())
+        if transform_applied and placed_vertices:
+            _before_node_ids, snap_before_transform = _snap_polygon_vertices_to_nodes(placed_vertices, nodes_for_region)
         node_ids, max_error = _snap_polygon_vertices_to_nodes(region.region.vertices, nodes_for_region)
+        snap_after_transform = max_error
         node_lookup = {node.node_id: node for node in nodes_for_region}
         snapped_points = [(node_lookup[node_id].x, node_lookup[node_id].y) for node_id in node_ids if node_id in node_lookup]
         policy = build_load_input_policy(region=region.region, load=region.load, snapped_points=snapped_points)
@@ -173,6 +210,14 @@ def build_assignments_from_regions(
                 direction_marker_source_id=policy.direction_marker_source_id,
                 hatch_pattern_name=region_hatch_pattern,
                 hatch_solid_fill=region_hatch_solid,
+                layout_metadata_used=layout_metadata_used,
+                layout_metadata_path=layout_metadata_path,
+                placed_bbox=placed_bbox,
+                source_bbox=source_bbox,
+                transform_applied=transform_applied,
+                snap_before_transform=snap_before_transform,
+                snap_after_transform=snap_after_transform,
+                snap_max_error=max_error,
             )
         )
     return assignments
@@ -215,6 +260,7 @@ def patch_full_mgt_with_floorloads(
 def patch_full_mgt_text(text: str, *, assignments: Sequence[FloorLoadAssignment], mode: str = "append") -> str:
     valid = [a for a in assignments if _is_assignment_recordable(a)]
     lines = _logical_lines(text.splitlines())
+    previous_floorload_count = _count_sections(lines, "*FLOORLOAD")
     if mode.lower() in {"overwrite", "replace"}:
         lines = _remove_sections(lines, {"*FLOADTYPE", "*FLOORLOAD"})
 
@@ -241,6 +287,8 @@ def patch_full_mgt_text(text: str, *, assignments: Sequence[FloorLoadAssignment]
 
     patched = "\r\n".join(lines) + "\r\n"
     _validate_patched_floorload_mgt(patched)
+    if valid:
+        _validate_appended_floorload_block(patched, previous_floorload_count=previous_floorload_count, require_new_block=mode.lower() not in {"overwrite", "replace"})
     return patched
 
 
@@ -260,6 +308,14 @@ def write_reports(
         row.update(
             {
                 "DXF Story": item.story_name,
+                "layout_metadata_used": "YES" if item.layout_metadata_used else "NO",
+                "layout_metadata_path": item.layout_metadata_path,
+                "placed_bbox": _format_bbox(item.placed_bbox),
+                "source_bbox": _format_bbox(item.source_bbox),
+                "transform_applied": "YES" if item.transform_applied else "NO",
+                "snap_before_transform": _format_optional_float(item.snap_before_transform),
+                "snap_after_transform": _format_optional_float(item.snap_after_transform),
+                "snap_max_error": _format_optional_float(item.snap_max_error),
                 "DXF source_id": item.source_id,
                 "DXF polygon_index": item.polygon_index,
                 "HATCH 패턴": item.hatch_pattern_name,
@@ -334,9 +390,17 @@ def run_mgt_build_pipeline(
         snap_tolerance=snap_tolerance,
         include_zero_load=include_zero_load,
     )
-    full = patch_full_mgt_with_floorloads(source_mgt_path=source_mgt_path, output_mgt_path=output_mgt_path, assignments=assignments, mode=mode, encoding=encoding)
     xlsx, csv_path = write_reports(assignments=assignments, output_dir=report_dir, model_name=model_name, story=story, dxf_name=dxf_name)
     preview = write_assignment_preview_dxf(assignments, story_nodes, preview_dxf_path)
+    valid_assignments = [a for a in assignments if _is_assignment_recordable(a)]
+    if not valid_assignments:
+        raise RuntimeError(
+            "사용자 DXF에서 MGT에 입력 가능한 FLOORLOAD가 0개입니다. "
+            "보고서의 Story 판정, inverse transform, snap error를 확인하세요.\n"
+            f"보고서: {csv_path}\n"
+            f"검증 DXF: {preview}"
+        )
+    full = patch_full_mgt_with_floorloads(source_mgt_path=source_mgt_path, output_mgt_path=output_mgt_path, assignments=assignments, mode=mode, encoding=encoding)
     return BuildResult(
         full_mgt_path=full,
         report_xlsx_path=xlsx,
@@ -385,6 +449,11 @@ def _section_head(line: str) -> str:
     if not stripped.startswith("*"):
         return ""
     return stripped.split(None, 1)[0].upper()
+
+
+def _count_sections(lines: Sequence[str], section_name: str) -> int:
+    target = section_name.upper()
+    return sum(1 for line in lines if _section_head(line) == target)
 
 
 def _find_section_range(lines: Sequence[str], section_name: str) -> tuple[int | None, int | None]:
@@ -557,6 +626,19 @@ def _validate_patched_floorload_mgt(text: str) -> None:
         )
 
 
+def _validate_appended_floorload_block(text: str, *, previous_floorload_count: int, require_new_block: bool) -> None:
+    lines = text.splitlines()
+    floorload_count = _count_sections(lines, "*FLOORLOAD")
+    if floorload_count <= 0:
+        raise RuntimeError("MGT generation error: valid FLOORLOAD assignments exist but no *FLOORLOAD block was written.")
+    if require_new_block and floorload_count <= previous_floorload_count:
+        raise RuntimeError("MGT generation error: valid FLOORLOAD assignments exist but no new *FLOORLOAD block was appended.")
+    enddata_index = _find_section_insert_position(lines, "*ENDDATA")
+    floorload_indices = [index for index, line in enumerate(lines) if _section_head(line) == "*FLOORLOAD"]
+    if enddata_index < len(lines) and floorload_indices and max(floorload_indices) > enddata_index:
+        raise RuntimeError("MGT generation error: *FLOORLOAD block must be placed before *ENDDATA.")
+
+
 def _validate_floorload_records_do_not_reference_dxf(records: Sequence[str]) -> None:
     for record in records:
         if "DXF_AUTO layer=" in record or "DXF_FLOORLOAD" in record or re.search(r"\bLOAD_\d{3}_", record):
@@ -579,5 +661,20 @@ def _mgt_field(value: object) -> str:
 
 
 def _fmt_load(value: float) -> str:
+    text = f"{float(value):.6f}".rstrip("0").rstrip(".")
+    return "0" if text in {"", "-0"} else text
+
+
+def _format_bbox(values: Sequence[float] | None) -> str:
+    if not values:
+        return ""
+    return ",".join(_format_optional_float(float(value)) for value in values)
+
+
+def _format_optional_float(value: float | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and math.isinf(value):
+        return "inf"
     text = f"{float(value):.6f}".rstrip("0").rstrip(".")
     return "0" if text in {"", "-0"} else text
