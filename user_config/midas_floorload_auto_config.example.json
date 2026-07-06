@@ -5,6 +5,7 @@
   "timeout_seconds": 60,
   "verify_ssl": true,
   "story_tolerance": 0.01,
+  "default_hatch_scale": 0.01,
   "snap_tolerance": 0.5,
   "area_error_limit": 0.25,
   "include_zero_load": false

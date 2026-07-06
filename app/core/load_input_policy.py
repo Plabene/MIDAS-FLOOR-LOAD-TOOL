@@ -148,16 +148,20 @@ def resolve_one_way_direction(
         else:
             warnings.append(REVIEW_DIRECTION_MARKER_TOO_SHORT_IGNORED)
 
-    if len(valid_markers) > 1:
+    if valid_markers:
+        representative = max(valid_markers, key=lambda item: float(getattr(item, "length", 0.0) or 0.0))
+        representative_angle = _angle_deg(representative.start, representative.end)
+        marker_angles = [_angle_deg(marker.start, marker.end) for marker in valid_markers]
+        source_ids = ",".join(str(getattr(marker, "source_id", "") or "") for marker in valid_markers)
+        if all(_axis_angle_delta(representative_angle, angle) <= 5.0 for angle in marker_angles):
+            return representative_angle, "DXF_DIRECTION_MARKER", source_ids, warnings, errors
         warnings.append(AMBIGUOUS_ONEWAY_DIRECTION)
-    if len(valid_markers) == 1:
-        marker = valid_markers[0]
         return (
-            _angle_deg(marker.start, marker.end),
-            "DXF_DIRECTION_MARKER",
-            str(getattr(marker, "source_id", "") or ""),
+            None,
+            "AMBIGUOUS_DIRECTION_MARKER",
+            source_ids,
             warnings,
-            errors,
+            [*errors, AMBIGUOUS_ONEWAY_DIRECTION],
         )
 
     angle = getattr(load, "one_way_angle_deg", None)
@@ -212,6 +216,13 @@ def _bbox_short_span_angle(points: Sequence[tuple[float, float]]) -> float | Non
 
 def _angle_deg(start: tuple[float, float], end: tuple[float, float]) -> float:
     return degrees(atan2(float(end[1]) - float(start[1]), float(end[0]) - float(start[0]))) % 360.0
+
+
+def _axis_angle_delta(a: float, b: float) -> float:
+    first = float(a) % 180.0
+    second = float(b) % 180.0
+    diff = abs(first - second)
+    return min(diff, 180.0 - diff)
 
 
 def _polygon_diagonal(polygon) -> float:

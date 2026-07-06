@@ -25,6 +25,7 @@ _TEMPLATE_REFERENCE_LAYERS = {
     "CENTERLINE_WALL",
     "REFERENCE_GRID",
     "FLOAD_GUIDE",
+    "FLOAD_HATCH_GUIDE",
     "STORY_LABEL",
     *DIRECTION_LAYERS,
     "FLOAD_DIRECTION_GUIDE",
@@ -39,6 +40,9 @@ class DirectionMarker:
     start: Point2D
     end: Point2D
     source_id: str = ""
+    segment_index: int = 0
+    parent_handle: str = ""
+    match_method: str = ""
 
     @property
     def length(self) -> float:
@@ -61,6 +65,7 @@ class HatchRegion:
     hatch_index: int = 0
     hatch_pattern_name: str = ""
     hatch_solid_fill: int = 0
+    hatch_pattern_scale: float | None = None
     direction_markers: list[DirectionMarker] = field(default_factory=list)
     layout_metadata_used: bool = False
     layout_metadata_path: str = ""
@@ -85,8 +90,10 @@ class HatchRegion:
             "hatch_index": self.hatch_index,
             "hatch_pattern_name": self.hatch_pattern_name,
             "hatch_solid_fill": self.hatch_solid_fill,
+            "hatch_pattern_scale": self.hatch_pattern_scale,
             "direction_marker_count": len(self.direction_markers),
             "direction_marker_source_ids": [marker.source_id for marker in self.direction_markers],
+            "direction_marker_match_methods": [marker.match_method for marker in self.direction_markers],
             "layout_metadata_used": self.layout_metadata_used,
             "layout_metadata_path": self.layout_metadata_path,
             "placed_bbox": self.placed_bbox,
@@ -111,6 +118,8 @@ def read_dxf_hatches(
     for entity in doc.modelspace():
         dxftype = entity.dxftype()
         if dxftype == "HATCH":
+            if str(entity.dxf.layer).upper() in _TEMPLATE_REFERENCE_LAYERS:
+                continue
             hatch_index += 1
             regions.extend(_regions_from_hatch(entity, tessellation_segments, min_area, hatch_index))
         elif include_closed_polylines and dxftype in {"LWPOLYLINE", "POLYLINE"}:
@@ -131,63 +140,92 @@ def _read_direction_markers(msp) -> list[DirectionMarker]:
         layer = str(entity.dxf.layer)
         if layer.upper() not in DIRECTION_LAYERS:
             continue
-        marker = _direction_marker_from_entity(entity)
-        if marker is not None:
-            markers.append(marker)
+        markers.extend(_direction_markers_from_entity(entity))
+    return markers
+
+
+def _direction_markers_from_entity(entity) -> list[DirectionMarker]:
+    dxftype = entity.dxftype()
+    handle = str(entity.dxf.handle)
+    layer = str(entity.dxf.layer)
+    if dxftype == "LINE":
+        return [
+            DirectionMarker(
+                source_type=dxftype,
+                layer=layer,
+                handle=handle,
+                start=_xy(entity.dxf.start),
+                end=_xy(entity.dxf.end),
+                source_id=handle,
+                parent_handle=handle,
+            )
+        ]
+    if dxftype == "LWPOLYLINE":
+        points = [(float(x), float(y)) for x, y, *_rest in entity.get_points("xy")]
+    elif dxftype == "POLYLINE":
+        points = [(float(v.dxf.location.x), float(v.dxf.location.y)) for v in entity.vertices]
+    else:
+        return []
+
+    markers: list[DirectionMarker] = []
+    for index in range(len(points) - 1):
+        markers.append(
+            DirectionMarker(
+                source_type=dxftype,
+                layer=layer,
+                handle=handle,
+                start=points[index],
+                end=points[index + 1],
+                source_id=f"{handle}:SEG{index + 1}",
+                segment_index=index + 1,
+                parent_handle=handle,
+            )
+        )
     return markers
 
 
 def _direction_marker_from_entity(entity) -> DirectionMarker | None:
-    dxftype = entity.dxftype()
-    start: Point2D | None = None
-    end: Point2D | None = None
-    if dxftype == "LINE":
-        start = _xy(entity.dxf.start)
-        end = _xy(entity.dxf.end)
-    elif dxftype == "LWPOLYLINE":
-        points = [(float(x), float(y)) for x, y, *_rest in entity.get_points("xy")]
-        if len(points) >= 2:
-            start = points[0]
-            end = points[-1]
-    elif dxftype == "POLYLINE":
-        points = [(float(v.dxf.location.x), float(v.dxf.location.y)) for v in entity.vertices]
-        if len(points) >= 2:
-            start = points[0]
-            end = points[-1]
-    if start is None or end is None:
-        return None
-    handle = str(entity.dxf.handle)
-    return DirectionMarker(
-        source_type=dxftype,
-        layer=str(entity.dxf.layer),
-        handle=handle,
-        start=start,
-        end=end,
-        source_id=handle,
-    )
+    markers = _direction_markers_from_entity(entity)
+    return markers[0] if markers else None
 
 
 def _with_direction_markers(region: HatchRegion, markers: Sequence[DirectionMarker]) -> HatchRegion:
-    matched = [marker for marker in markers if _direction_marker_matches_polygon(marker, region.polygon)]
+    matched = []
+    for marker in markers:
+        method = _direction_marker_match_method(marker, region.polygon)
+        if method:
+            matched.append(replace(marker, match_method=method))
     if not matched:
         return region
     return replace(region, direction_markers=matched)
 
 
 def _direction_marker_matches_polygon(marker: DirectionMarker, polygon: Polygon) -> bool:
-    if polygon.is_empty:
-        return False
+    return _direction_marker_match_method(marker, polygon) is not None
+
+
+def _direction_marker_match_method(marker: DirectionMarker, polygon: Polygon) -> str | None:
+    if polygon is None or polygon.is_empty:
+        return None
+    if marker.length <= 1.0e-12:
+        return None
     line = LineString([marker.start, marker.end])
+    if line.length <= 1.0e-12:
+        return None
     midpoint = Point((marker.start[0] + marker.end[0]) / 2.0, (marker.start[1] + marker.end[1]) / 2.0)
     start = Point(marker.start)
     end = Point(marker.end)
-    if polygon.covers(midpoint) or polygon.covers(start) or polygon.covers(end):
-        return True
-    if line.intersects(polygon):
-        return True
+    if polygon.covers(midpoint):
+        return "MIDPOINT_INSIDE"
+    if polygon.covers(start) or polygon.covers(end):
+        return "ENDPOINT_INSIDE"
+    if line.crosses(polygon) or line.within(polygon) or line.intersects(polygon):
+        return "INTERSECT"
     min_x, min_y, max_x, max_y = polygon.bounds
     diagonal = max(hypot(max_x - min_x, max_y - min_y), 1.0)
-    return polygon.distance(midpoint) <= diagonal * 1.0e-6
+    if line.buffer(diagonal * 1.0e-9).intersects(polygon):
+        return "BUFFER_INTERSECT"
+    return None
 
 
 def _regions_from_hatch(entity, tessellation_segments: int, min_area: float, hatch_index: int = 0) -> list[HatchRegion]:
@@ -213,6 +251,7 @@ def _regions_from_hatch(entity, tessellation_segments: int, min_area: float, hat
     handle = str(entity.dxf.handle)
     pattern_name = str(getattr(entity.dxf, "pattern_name", "") or "").upper()
     solid_fill = int(getattr(entity.dxf, "solid_fill", 0) or 0)
+    pattern_scale = _try_float(getattr(entity.dxf, "pattern_scale", None))
     for polygon_index, polygon in enumerate(polygons, start=1):
         exterior = list(polygon.exterior.coords)[:-1]
         regions.append(
@@ -230,6 +269,7 @@ def _regions_from_hatch(entity, tessellation_segments: int, min_area: float, hat
                 hatch_index=hatch_index,
                 hatch_pattern_name=pattern_name,
                 hatch_solid_fill=solid_fill,
+                hatch_pattern_scale=pattern_scale,
             )
         )
     return regions
@@ -490,6 +530,15 @@ def _dedupe_consecutive(vertices: Sequence[Point2D], tolerance: float = 1.0e-9) 
 
 def _same_point(a: Point2D, b: Point2D, tolerance: float = 1.0e-9) -> bool:
     return abs(a[0] - b[0]) <= tolerance and abs(a[1] - b[1]) <= tolerance
+
+
+def _try_float(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 # ---- v4 load-region wrapper -------------------------------------------------
 from dataclasses import dataclass as _dataclass
 from typing import Any as _Any
@@ -528,8 +577,10 @@ class LoadRegion:
                 "polygon_index": self.region.polygon_index,
                 "hatch_pattern_name": self.region.hatch_pattern_name,
                 "hatch_solid_fill": self.region.hatch_solid_fill,
+                "hatch_pattern_scale": self.region.hatch_pattern_scale,
                 "direction_marker_count": len(self.region.direction_markers),
                 "direction_marker_source_ids": [marker.source_id for marker in self.region.direction_markers],
+                "direction_marker_match_methods": [marker.match_method for marker in self.region.direction_markers],
                 "warnings": list(self.warnings),
             }
         )
@@ -588,7 +639,7 @@ def read_load_regions(
                 )
             else:
                 load = parse_load_layer(region.layer)
-            status = "OK" if not warnings else "REVIEW"
+            status = _status_from_region_warnings(warnings)
         except Exception as exc:  # noqa: BLE001 - layer parse errors should be record-level warnings
             load = None
             status = "LOAD_PARSE_FAILED"
@@ -618,6 +669,7 @@ def _region_with_story_layout(region: HatchRegion, story_layouts, metadata_path:
             hatch_index=region.hatch_index,
             hatch_pattern_name=region.hatch_pattern_name,
             hatch_solid_fill=region.hatch_solid_fill,
+            hatch_pattern_scale=region.hatch_pattern_scale,
             direction_markers=region.direction_markers,
             layout_metadata_used=metadata_path is not None,
             layout_metadata_path=str(metadata_path or ""),
@@ -647,6 +699,7 @@ def _region_with_story_layout(region: HatchRegion, story_layouts, metadata_path:
         hatch_index=region.hatch_index,
         hatch_pattern_name=region.hatch_pattern_name,
         hatch_solid_fill=region.hatch_solid_fill,
+        hatch_pattern_scale=region.hatch_pattern_scale,
         direction_markers=direction_markers,
         layout_metadata_used=metadata_path is not None,
         layout_metadata_path=str(metadata_path or ""),
@@ -666,6 +719,9 @@ def _transform_direction_marker(marker: DirectionMarker, transform) -> Direction
         start=transform.apply(*marker.start),
         end=transform.apply(*marker.end),
         source_id=marker.source_id,
+        segment_index=marker.segment_index,
+        parent_handle=marker.parent_handle,
+        match_method=marker.match_method,
     )
 
 
@@ -685,6 +741,16 @@ def _load_layer_mapping(path: str | Path | None) -> dict[str, dict[str, _Any]]:
         with p.open("r", encoding="utf-8-sig", newline="") as f:
             return {str(row.get("layer")): row for row in _csv.DictReader(f) if row.get("layer")}
     return {}
+
+
+def _status_from_region_warnings(warnings: Sequence[str]) -> str:
+    if not warnings:
+        return "OK"
+    if any(str(warning) == "AMBIGUOUS_STORY" for warning in warnings):
+        return "AMBIGUOUS_STORY"
+    if any(str(warning) in {"NO_STORY_LAYOUT", "STORY_NOT_DETECTED"} for warning in warnings):
+        return "STORY_NOT_DETECTED"
+    return "REVIEW"
 
 
 def _looks_like_all_story_dxf(path: Path) -> bool:

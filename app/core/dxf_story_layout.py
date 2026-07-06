@@ -6,10 +6,22 @@ from pathlib import Path
 from statistics import median
 from typing import Iterable, Sequence
 import json
+import re
 
 import ezdxf
 from shapely.affinity import affine_transform
 from shapely.geometry import Polygon
+
+_HATCH_BBOX_EXCLUDED_LAYERS = {
+    "CENTERLINE_COLUMN",
+    "CENTERLINE_BEAM",
+    "CENTERLINE_WALL",
+    "REFERENCE_GRID",
+    "FLOAD_GUIDE",
+    "FLOAD_HATCH_GUIDE",
+    "STORY_LABEL",
+    "FLOAD_DIRECTION_GUIDE",
+}
 
 
 @dataclass(frozen=True)
@@ -98,6 +110,29 @@ class StoryLayout:
     text_height: float
 
 
+@dataclass(frozen=True)
+class DxfStoryLabel:
+    text: str
+    x: float
+    y: float
+    layer: str
+
+
+@dataclass(frozen=True)
+class LayoutMetadataCandidateScore:
+    path: Path
+    score: float
+    details: dict
+
+
+@dataclass(frozen=True)
+class LayoutMetadataSelection:
+    selected_path: Path | None
+    candidates: tuple[LayoutMetadataCandidateScore, ...]
+    selection_required: bool = False
+    reason: str = ""
+
+
 def bbox_from_points(points: Iterable[tuple[float, float]], fallback_size: float = 1.0) -> BBox2D:
     pts = [(float(x), float(y)) for x, y in points]
     if not pts:
@@ -116,6 +151,32 @@ def bbox_from_points(points: Iterable[tuple[float, float]], fallback_size: float
     return BBox2D(min_x, min_y, max_x, max_y)
 
 
+def _bbox_reference_dimension(bbox: BBox2D) -> float:
+    width = max(float(bbox.width), 0.0)
+    height = max(float(bbox.height), 0.0)
+    if width > 0.0 and height > 0.0:
+        return min(width, height)
+    return max(width, height, 1.0)
+
+
+def _compute_story_label_text_height(bbox: BBox2D) -> float:
+    return _compute_story_label_text_height_from_ref(_bbox_reference_dimension(bbox))
+
+
+def _compute_story_label_text_height_from_ref(ref: float) -> float:
+    base = max(float(ref), 1.0e-9)
+    return _clamp(base * 0.045, base * 0.025, base * 0.080)
+
+
+def _compute_point_display_size_from_ref(ref: float) -> float:
+    base = max(float(ref), 1.0e-9)
+    return _clamp(base * 0.012, base * 0.004, base * 0.025)
+
+
+def _clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(float(minimum), min(float(value), float(maximum)))
+
+
 def plan_story_layouts(stories: Sequence[object], source_bboxes: Sequence[BBox2D]) -> list[StoryLayout]:
     if len(stories) != len(source_bboxes):
         raise ValueError("stories and source_bboxes must have the same length.")
@@ -123,23 +184,23 @@ def plan_story_layouts(stories: Sequence[object], source_bboxes: Sequence[BBox2D
         return []
 
     heights = [bbox.height for bbox in source_bboxes if bbox.height > 1.0e-9]
-    widths = [bbox.width for bbox in source_bboxes if bbox.width > 1.0e-9]
     representative_height = median(heights) if heights else 1.0
-    representative_width = median(widths) if widths else representative_height
-    representative_size = max(representative_height, representative_width, 1.0)
-    text_height = max(representative_size * 0.025, representative_height * 0.02, 0.25)
+    refs = [_bbox_reference_dimension(bbox) for bbox in source_bboxes]
+    representative_ref = median(refs) if refs else 1.0
+    text_height = _compute_story_label_text_height_from_ref(representative_ref)
+    point_display_size = _compute_point_display_size_from_ref(representative_ref)
 
     layouts: list[StoryLayout] = []
     cursor_y = 0.0
     for index, (story, bbox) in enumerate(zip(stories, source_bboxes)):
         height = max(bbox.height, representative_height)
-        gap = max(height * 0.20, text_height * 8.0, representative_height * 0.10)
+        gap = max(height * 0.20, text_height * 2.0, representative_height * 0.10)
         offset_x = -bbox.min_x
         offset_y = cursor_y - bbox.max_y
         transform = Affine2D(e=offset_x, f=offset_y)
         inverse = transform.inverse()
         placed = bbox.translated(offset_x, offset_y)
-        label_margin = max(text_height * 4.0, placed.width * 0.04, 1.0)
+        label_margin = max(text_height * 2.5, point_display_size * 2.0)
         story_name = str(getattr(story, "name", f"Story{index + 1}"))
         elevation = getattr(story, "elevation", None)
         layouts.append(
@@ -208,8 +269,56 @@ _USER_EDIT_SUFFIXES = (
     "_user_input",
     "_edited",
     "_작성",
+    "_수정",
     "_수정본",
+    "_copy",
+    "_복사본",
 )
+
+
+AUTO_SELECT_MIN_SCORE = 700.0
+AUTO_SELECT_MIN_DELTA = 50.0
+
+
+def find_layout_metadata_candidates(
+    *,
+    dxf_path: Path,
+    explicit_path: Path | None = None,
+    project_dxf_templates_dir: Path | None = None,
+    project_root: Path | None = None,
+) -> list[Path]:
+    candidates: list[Path] = []
+    dxf = Path(dxf_path)
+
+    if explicit_path and Path(explicit_path).exists():
+        candidates.append(Path(explicit_path))
+
+    stems = _candidate_template_stems(dxf.stem)
+    for stem in stems:
+        candidates.append(dxf.parent / f"{stem}.layout_metadata.json")
+
+    try:
+        candidates.extend(path for path in dxf.parent.glob("*layout_metadata.json") if path.is_file())
+    except OSError:
+        pass
+
+    template_dirs: list[Path] = []
+    if project_dxf_templates_dir:
+        template_dirs.append(Path(project_dxf_templates_dir))
+    if project_root:
+        root = Path(project_root)
+        template_dirs.extend([root / "dxf_templates", root])
+
+    for directory in template_dirs:
+        if not directory.exists():
+            continue
+        try:
+            candidates.extend(path for path in directory.glob("*ALL_STORIES*layout_metadata.json") if path.is_file())
+            candidates.extend(path for path in directory.glob("*layout_metadata.json") if path.is_file())
+        except OSError:
+            continue
+
+    return _dedupe_existing_paths(candidates)
 
 
 def find_layout_metadata_path(
@@ -219,15 +328,40 @@ def find_layout_metadata_path(
     search_dirs: Sequence[str | Path] | None = None,
     project_dxf_templates_dir: str | Path | None = None,
 ) -> Path | None:
-    extra_search_dirs = list(search_dirs or [])
-    if project_dxf_templates_dir:
-        extra_search_dirs.append(project_dxf_templates_dir)
-    return _find_template_artifact_path(
-        dxf_path,
-        suffix=".layout_metadata.json",
-        mapping_path=mapping_path,
-        search_dirs=extra_search_dirs,
+    explicit = None
+    candidates = find_layout_metadata_candidates(
+        dxf_path=Path(dxf_path),
+        explicit_path=explicit,
+        project_dxf_templates_dir=Path(project_dxf_templates_dir) if project_dxf_templates_dir else None,
     )
+    search_dir_candidates: list[Path] = []
+    for directory in search_dirs or ():
+        path = Path(directory)
+        if not path.exists():
+            continue
+        try:
+            search_dir_candidates.extend(candidate for candidate in path.glob("*ALL_STORIES*layout_metadata.json") if candidate.is_file())
+            search_dir_candidates.extend(candidate for candidate in path.glob("*layout_metadata.json") if candidate.is_file())
+        except OSError:
+            continue
+    candidates = _dedupe_existing_paths([*candidates, *search_dir_candidates])
+    if not candidates:
+        extra_search_dirs = list(search_dirs or [])
+        if project_dxf_templates_dir:
+            extra_search_dirs.append(project_dxf_templates_dir)
+        return _find_template_artifact_path(
+            dxf_path,
+            suffix=".layout_metadata.json",
+            mapping_path=mapping_path,
+            search_dirs=extra_search_dirs,
+        )
+    result = select_layout_metadata(
+        dxf_path=Path(dxf_path),
+        explicit_path=None,
+        project_dxf_templates_dir=Path(project_dxf_templates_dir) if project_dxf_templates_dir else None,
+        extra_candidates=candidates,
+    )
+    return result.selected_path
 
 
 def find_layer_mapping_path(
@@ -239,6 +373,146 @@ def find_layer_mapping_path(
     if json_path:
         return json_path
     return _find_template_artifact_path(dxf_path, suffix=".layer_mapping.csv", search_dirs=search_dirs)
+
+
+def select_layout_metadata(
+    *,
+    dxf_path: Path,
+    explicit_path: Path | None = None,
+    project_dxf_templates_dir: Path | None = None,
+    project_root: Path | None = None,
+    extra_candidates: Sequence[Path] | None = None,
+) -> LayoutMetadataSelection:
+    if explicit_path and Path(explicit_path).exists():
+        path = Path(explicit_path)
+        score, details = score_layout_metadata_candidate(
+            dxf_story_labels=extract_story_label_fingerprint(Path(dxf_path)),
+            metadata_path=path,
+            hatch_bboxes=_extract_hatch_bboxes(Path(dxf_path)),
+        )
+        return LayoutMetadataSelection(path, (LayoutMetadataCandidateScore(path, score, details),), False, "EXPLICIT")
+
+    candidates = find_layout_metadata_candidates(
+        dxf_path=Path(dxf_path),
+        explicit_path=None,
+        project_dxf_templates_dir=project_dxf_templates_dir,
+        project_root=project_root,
+    )
+    candidates = _dedupe_existing_paths([*(extra_candidates or ()), *candidates])
+    if not candidates:
+        return LayoutMetadataSelection(None, tuple(), False, "NO_CANDIDATES")
+
+    labels = extract_story_label_fingerprint(Path(dxf_path))
+    hatch_bboxes = _extract_hatch_bboxes(Path(dxf_path))
+    scored: list[LayoutMetadataCandidateScore] = []
+    for candidate in candidates:
+        score, details = score_layout_metadata_candidate(
+            dxf_story_labels=labels,
+            metadata_path=candidate,
+            hatch_bboxes=hatch_bboxes,
+        )
+        scored.append(LayoutMetadataCandidateScore(candidate, score, details))
+    scored.sort(key=lambda item: (-item.score, str(item.path).lower()))
+
+    if len(scored) == 1:
+        return LayoutMetadataSelection(scored[0].path, tuple(scored), False, "SINGLE_CANDIDATE")
+
+    best = scored[0]
+    second_score = scored[1].score if len(scored) > 1 else 0.0
+    if best.score >= AUTO_SELECT_MIN_SCORE and best.score - second_score >= AUTO_SELECT_MIN_DELTA:
+        return LayoutMetadataSelection(best.path, tuple(scored), False, "AUTO_SELECTED")
+    return LayoutMetadataSelection(None, tuple(scored), True, "AMBIGUOUS_CANDIDATES")
+
+
+def extract_story_label_fingerprint(dxf_path: Path) -> list[DxfStoryLabel]:
+    try:
+        doc = ezdxf.readfile(str(dxf_path))
+    except Exception:
+        return []
+
+    story_layer_labels: list[DxfStoryLabel] = []
+    fallback_labels: list[DxfStoryLabel] = []
+    for entity in doc.modelspace():
+        if entity.dxftype() not in {"TEXT", "MTEXT"}:
+            continue
+        text = _entity_text(entity)
+        if not text:
+            continue
+        point = _entity_insert_point(entity)
+        if point is None:
+            continue
+        layer = str(getattr(entity.dxf, "layer", "") or "")
+        label = DxfStoryLabel(text=text, x=point[0], y=point[1], layer=layer)
+        if layer.upper() == "STORY_LABEL":
+            story_layer_labels.append(label)
+        elif _looks_like_story_label(text):
+            fallback_labels.append(label)
+    return story_layer_labels or fallback_labels
+
+
+def score_layout_metadata_candidate(
+    *,
+    dxf_story_labels: list[DxfStoryLabel],
+    metadata_path: Path,
+    hatch_bboxes: list[tuple[float, float, float, float]],
+) -> tuple[float, dict]:
+    path = Path(metadata_path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return 0.0, {"error": "READ_FAILED", "story_count": 0, "label_match_count": 0}
+
+    layouts = layouts_from_metadata(data)
+    details: dict = {
+        "mode": str(data.get("mode") or ""),
+        "story_count": len(layouts),
+        "label_match_count": 0,
+        "label_position_error": None,
+        "hatch_overlap_ratio": 0.0,
+    }
+    if not layouts:
+        return 0.0, details
+
+    score = 100.0 if data.get("mode") == "ALL_STORIES" else 0.0
+    layout_by_name = {_normalize_story_label(layout.story_name): layout for layout in layouts if layout.story_name}
+    matched_pairs: list[tuple[DxfStoryLabel, StoryLayout, float]] = []
+    for label in dxf_story_labels:
+        layout = layout_by_name.get(_normalize_story_label(label.text))
+        if not layout:
+            continue
+        distance = hypot(layout.label_x - label.x, layout.label_y - label.y)
+        matched_pairs.append((label, layout, distance))
+
+    if dxf_story_labels:
+        match_ratio = len(matched_pairs) / max(len(dxf_story_labels), 1)
+        score += match_ratio * 500.0
+        details["label_match_count"] = len(matched_pairs)
+        details["label_count"] = len(dxf_story_labels)
+
+    if matched_pairs:
+        label_bbox = bbox_from_points((label.x, label.y) for label, _layout, _distance in matched_pairs)
+        metadata_label_bbox = bbox_from_points((layout.label_x, layout.label_y) for _label, layout, _distance in matched_pairs)
+        label_scale = max(
+            hypot(label_bbox.width, label_bbox.height),
+            median([max(layout.text_height * 10.0, 1.0) for _label, layout, _distance in matched_pairs]),
+            1.0,
+        )
+        avg_error = sum(distance for _label, _layout, distance in matched_pairs) / len(matched_pairs)
+        normalized_error = avg_error / label_scale
+        score += max(0.0, 300.0 * (1.0 - normalized_error))
+        details["label_position_error"] = avg_error
+
+        bbox_size_error = (
+            abs(label_bbox.width - metadata_label_bbox.width)
+            + abs(label_bbox.height - metadata_label_bbox.height)
+        ) / max(label_scale, 1.0)
+        score += max(0.0, 100.0 * (1.0 - bbox_size_error))
+        details["label_bbox_size_error"] = bbox_size_error
+
+    hatch_overlap_ratio = _hatch_layout_overlap_ratio(hatch_bboxes, layouts)
+    score += hatch_overlap_ratio * 100.0
+    details["hatch_overlap_ratio"] = hatch_overlap_ratio
+    return score, details
 
 
 def metadata_from_layouts(layouts: Sequence[StoryLayout]) -> dict:
@@ -303,19 +577,9 @@ def _find_template_artifact_path(
         matches = _all_story_template_artifact_candidates(dirs, suffix)
         if not matches:
             return None
-        if len(matches) > 1 and suffix == ".layout_metadata.json":
-            selected = _choose_layout_metadata_by_story_labels(dxf, matches)
-            if selected:
-                return selected
-            if _read_story_labels_from_dxf(dxf):
-                raise RuntimeError(
-                    "전층 DXF layout metadata 후보가 여러 개라 자동 선택할 수 없습니다. "
-                    "DXF 검증 전에 해당 template의 layout_metadata.json을 명시해 주세요."
-                )
     if len(matches) > 1 and suffix == ".layout_metadata.json":
-        selected = _choose_layout_metadata_by_story_labels(dxf, matches)
-        if selected:
-            return selected
+        result = select_layout_metadata(dxf_path=dxf, extra_candidates=matches)
+        return result.selected_path
     matches.sort(key=lambda path: (len(path.stem), str(path).lower()))
     return matches[0]
 
@@ -340,6 +604,24 @@ def _candidate_search_dirs(
             continue
         seen.add(key)
         result.append(resolved)
+    return result
+
+
+def _dedupe_existing_paths(paths: Sequence[Path]) -> list[Path]:
+    result: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        p = Path(path)
+        if not p.exists():
+            continue
+        try:
+            key = str(p.resolve()).lower()
+        except OSError:
+            key = str(p).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(p)
     return result
 
 
@@ -394,60 +676,102 @@ def _all_story_template_artifact_candidates(dirs: Sequence[Path], suffix: str) -
     return matches
 
 
-def _choose_layout_metadata_by_story_labels(dxf_path: Path, candidates: Sequence[Path]) -> Path | None:
-    labels = _read_story_labels_from_dxf(dxf_path)
-    if not labels:
-        return None
-    scored: list[tuple[int, float, Path]] = []
-    for candidate in candidates:
-        layouts = read_layout_metadata(candidate)
-        if not layouts:
-            continue
-        layout_by_name = {_normalize_story_label(layout.story_name): layout for layout in layouts if layout.story_name}
-        match_count = 0
-        distance_sum = 0.0
-        for text, x, y in labels:
-            layout = layout_by_name.get(_normalize_story_label(text))
-            if not layout:
-                continue
-            tolerance = max(float(layout.text_height or 0.25) * 8.0, layout.placed_bbox.width * 0.02, 0.5)
-            distance = hypot(float(layout.label_x) - x, float(layout.label_y) - y)
-            if distance <= tolerance:
-                match_count += 1
-                distance_sum += distance
-        if match_count:
-            scored.append((match_count, distance_sum, candidate))
-    if not scored:
-        return None
-    scored.sort(key=lambda item: (-item[0], item[1], str(item[2]).lower()))
-    best = scored[0]
-    if len(scored) > 1:
-        second = scored[1]
-        if best[0] == second[0] and abs(best[1] - second[1]) <= 1.0e-6:
-            return None
-    return best[2]
-
-
-def _read_story_labels_from_dxf(dxf_path: Path) -> list[tuple[str, float, float]]:
+def _extract_hatch_bboxes(dxf_path: Path) -> list[tuple[float, float, float, float]]:
     try:
         doc = ezdxf.readfile(str(dxf_path))
     except Exception:
         return []
-    labels: list[tuple[str, float, float]] = []
+    bboxes: list[tuple[float, float, float, float]] = []
     for entity in doc.modelspace():
-        if entity.dxftype() not in {"TEXT", "MTEXT"}:
-            continue
         layer = str(getattr(entity.dxf, "layer", "") or "").upper()
-        if layer != "STORY_LABEL":
+        if layer in _HATCH_BBOX_EXCLUDED_LAYERS:
             continue
-        text = _entity_text(entity)
-        if not text:
-            continue
-        insert = getattr(entity.dxf, "insert", None)
-        if insert is None:
-            continue
-        labels.append((text, float(insert.x), float(insert.y)))
-    return labels
+        if entity.dxftype() == "HATCH":
+            bbox = _hatch_entity_bbox(entity)
+            if bbox:
+                bboxes.append(bbox)
+        elif entity.dxftype() in {"LWPOLYLINE", "POLYLINE"}:
+            if not layer.startswith("LOAD_"):
+                continue
+            bbox = _polyline_entity_bbox(entity)
+            if bbox:
+                bboxes.append(bbox)
+    return bboxes
+
+
+def _hatch_entity_bbox(entity) -> tuple[float, float, float, float] | None:
+    points: list[tuple[float, float]] = []
+    for path in getattr(entity, "paths", []) or []:
+        if hasattr(path, "vertices"):
+            for item in path.vertices:
+                if len(item) >= 2:
+                    points.append((float(item[0]), float(item[1])))
+        elif hasattr(path, "edges"):
+            for edge in path.edges:
+                if hasattr(edge, "start"):
+                    points.append(_xy(edge.start))
+                if hasattr(edge, "end"):
+                    points.append(_xy(edge.end))
+                if hasattr(edge, "center") and hasattr(edge, "radius"):
+                    cx, cy = _xy(edge.center)
+                    radius = float(edge.radius)
+                    points.extend([(cx - radius, cy - radius), (cx + radius, cy + radius)])
+    return _bbox_tuple_from_points(points)
+
+
+def _polyline_entity_bbox(entity) -> tuple[float, float, float, float] | None:
+    if entity.dxftype() == "LWPOLYLINE":
+        points = [(float(x), float(y)) for x, y, *_rest in entity.get_points("xy")]
+    else:
+        points = [(float(v.dxf.location.x), float(v.dxf.location.y)) for v in entity.vertices]
+    return _bbox_tuple_from_points(points)
+
+
+def _bbox_tuple_from_points(points: Sequence[tuple[float, float]]) -> tuple[float, float, float, float] | None:
+    if not points:
+        return None
+    xs = [float(x) for x, _y in points]
+    ys = [float(y) for _x, y in points]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _hatch_layout_overlap_ratio(hatch_bboxes: Sequence[tuple[float, float, float, float]], layouts: Sequence[StoryLayout]) -> float:
+    if not hatch_bboxes or not layouts:
+        return 0.0
+    ratios: list[float] = []
+    for bbox_tuple in hatch_bboxes:
+        bbox = _bbox_from_bounds(bbox_tuple)
+        area = max(bbox.area, 1.0e-12)
+        best = max(layout.placed_bbox.overlap_area(bbox) / area for layout in layouts)
+        ratios.append(min(max(best, 0.0), 1.0))
+    return sum(ratios) / len(ratios)
+
+
+def _entity_insert_point(entity) -> tuple[float, float] | None:
+    point = getattr(entity.dxf, "insert", None)
+    if point is None and hasattr(entity, "get_location"):
+        try:
+            point = entity.get_location()[1]
+        except Exception:
+            point = None
+    if point is None:
+        return None
+    return _xy(point)
+
+
+def _xy(point) -> tuple[float, float]:
+    if hasattr(point, "x") and hasattr(point, "y"):
+        return (float(point.x), float(point.y))
+    return (float(point[0]), float(point[1]))
+
+
+def _looks_like_story_label(text: str) -> bool:
+    compact = "".join(str(text or "").split())
+    if not compact:
+        return False
+    if len(compact) > 32:
+        return False
+    return bool(re.match(r"^(?:B\d+|P\d+|\d+F|R(?:F|OOF)?|ROOF|[A-Z가-힣0-9_-]{1,16})$", compact, re.IGNORECASE))
 
 
 def _entity_text(entity) -> str:

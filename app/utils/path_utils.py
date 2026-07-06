@@ -51,6 +51,29 @@ def unique_output_path(path: Path) -> Path:
     return parent / f"{stem}_{timestamp}{suffix}"
 
 
+def unique_numbered_path(path: str | Path, *, start: int = 2) -> Path:
+    path = Path(path)
+    if not path.exists():
+        return path
+
+    stem = path.stem
+    suffix = path.suffix
+    parent = path.parent
+    try:
+        index = max(2, int(start))
+    except Exception:
+        index = 2
+
+    while index < 10000:
+        candidate = parent / f"{stem}_{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return parent / f"{stem}_{timestamp}{suffix}"
+
+
 def output_root_dir(data_root: Path) -> Path:
     out = Path(data_root) / "OUTPUT"
     out.mkdir(parents=True, exist_ok=True)

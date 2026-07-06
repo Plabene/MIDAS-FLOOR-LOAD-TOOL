@@ -35,7 +35,8 @@ def test_write_story_guide_text_below_geometry_with_malgun_style(tmp_path: Path)
 
     doc = ezdxf.readfile(out)
     guide_texts = [text for text in doc.modelspace().query("TEXT") if text.dxf.layer == "FLOAD_GUIDE"]
-    assert len(guide_texts) == 4
+    assert len(guide_texts) >= 6
     assert doc.styles.get("MALGUN_GOTHIC").dxf.font == "malgun.ttf"
     assert {text.dxf.style for text in guide_texts} == {"MALGUN_GOTHIC"}
     assert all(text.dxf.insert.y < 20.0 for text in guide_texts)
+    assert any("0.01" in text.dxf.text for text in guide_texts)

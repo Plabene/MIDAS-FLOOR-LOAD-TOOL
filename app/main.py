@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass
+import inspect
 import os
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +17,8 @@ try:
     # package 실행: python -m app.main
     from .core.dxf_load_reader import read_load_regions
     from .core.diagnostic_dxf_writer import write_floorload_diagnostic_dxf
-    from .core.dxf_template_writer import LoadLayerSpec, write_all_story_centerline_dxf, write_story_centerline_dxf
+    from .core.dxf_template_writer import LoadLayerSpec, normalize_hatch_scale, write_all_story_centerline_dxf, write_story_centerline_dxf
+    from .core.dxf_story_layout import LayoutMetadataSelection, select_layout_metadata
     from .core.floorload_mgt_builder import run_mgt_build_pipeline
     from .core.load_selection import apply_load_display_names
     from .core.pdf_load_importer import (
@@ -36,6 +39,7 @@ try:
     from .core.load_parser import parse_load_layer
     from .core.load_input_policy import infer_distribution
     from .core.model_floorload_diagnostics import analyze_floorload_model, write_diagnostic_reports
+    from .core.progress import ProgressReporter
     from .utils.config import AppConfig, load_config, save_config
     from .utils.logger import setup_logger
     from .utils.path_utils import (
@@ -44,6 +48,7 @@ try:
         project_output_dir,
         project_root,
         safe_filename,
+        unique_numbered_path,
         unique_output_path,
     )
 except ImportError:  # 직접 실행: python app/main.py
@@ -52,7 +57,8 @@ except ImportError:  # 직접 실행: python app/main.py
         sys.path.insert(0, str(ROOT))
     from app.core.dxf_load_reader import read_load_regions
     from app.core.diagnostic_dxf_writer import write_floorload_diagnostic_dxf
-    from app.core.dxf_template_writer import LoadLayerSpec, write_all_story_centerline_dxf, write_story_centerline_dxf
+    from app.core.dxf_template_writer import LoadLayerSpec, normalize_hatch_scale, write_all_story_centerline_dxf, write_story_centerline_dxf
+    from app.core.dxf_story_layout import LayoutMetadataSelection, select_layout_metadata
     from app.core.floorload_mgt_builder import run_mgt_build_pipeline
     from app.core.load_selection import apply_load_display_names
     from app.core.pdf_load_importer import (
@@ -73,6 +79,7 @@ except ImportError:  # 직접 실행: python app/main.py
     from app.core.load_parser import parse_load_layer
     from app.core.load_input_policy import infer_distribution
     from app.core.model_floorload_diagnostics import analyze_floorload_model, write_diagnostic_reports
+    from app.core.progress import ProgressReporter
     from app.utils.config import AppConfig, load_config, save_config
     from app.utils.logger import setup_logger
     from app.utils.path_utils import (
@@ -81,6 +88,7 @@ except ImportError:  # 직접 실행: python app/main.py
         project_output_dir,
         project_root,
         safe_filename,
+        unique_numbered_path,
         unique_output_path,
     )
 
@@ -94,6 +102,19 @@ def _mgbx_path(path: str | Path) -> Path:
 
 ALL_STORIES_VALUE = "__ALL_STORIES__"
 ALL_STORIES_LABEL = "전층"
+DXF_NEXT_ACTION_BG = "#FFD966"
+DXF_NEXT_ACTION_ACTIVE_BG = "#FFE699"
+MODEL_NEXT_ACTION_BG = "#A9D18E"
+MODEL_NEXT_ACTION_ACTIVE_BG = "#C6E0B4"
+
+
+@dataclass(frozen=True)
+class BuildPipelineUiResult:
+    message: str
+    generated_model_path: Path | None = None
+
+    def __str__(self) -> str:
+        return self.message
 
 
 def _format_dxf_validation_summary(regions) -> str:
@@ -114,6 +135,15 @@ def _format_dxf_validation_summary(regions) -> str:
     lines.append(f"- metadata: {'사용됨' if metadata_used_count else '미사용'}")
     if metadata_used_count:
         lines.append(f"- transform_applied: {transform_count}개")
+        metadata_paths = sorted(
+            {
+                str(getattr(region.region, "layout_metadata_path", "") or "")
+                for region in regions
+                if getattr(region.region, "layout_metadata_path", "")
+            }
+        )
+        if metadata_paths:
+            lines.append(f"- metadata 경로: {metadata_paths[0]}")
     return "\n".join(lines)
 
 
@@ -147,6 +177,7 @@ class FloorLoadAutoApp(tk.Tk):
         self.user_dxf_path = tk.StringVar()
         self.target_model_path = tk.StringVar()
         self.mapping_path = tk.StringVar()
+        self.layout_metadata_path = tk.StringVar()
         self.selected_story_name = tk.StringVar()
         self.stories: list[Story] = []
         self.nodes = []
@@ -165,9 +196,19 @@ class FloorLoadAutoApp(tk.Tk):
         self.pdf_load_all_var = tk.BooleanVar(value=False)
         self.final_load_items: list[dict] = []
         self.last_generated_dxf_path: Path | None = None
+        self.last_generated_model_path: Path | None = None
+        self.generated_dxf_path = tk.StringVar(value="")
+        self.generated_model_path = tk.StringVar(value="")
+        self.dxf_next_action_text_var = tk.StringVar(value="DXF 생성 전에는 열 수 있는 파일이 없습니다.")
+        self.model_next_action_text_var = tk.StringVar(value="모델링 파일 생성 전에는 열 수 있는 파일이 없습니다.")
         self.floorload_status_var = tk.StringVar(value="모델/MGT를 먼저 읽어 FLOOR LOAD 존재 여부를 분석하세요.")
         self.pdf_mgtx_path = tk.StringVar()
         self.pdf_merge_output_path = tk.StringVar()
+        self.progress_var = tk.DoubleVar(value=0.0)
+        self.progress_text_var = tk.StringVar(value="대기 중")
+        self.progress_percent_var = tk.StringVar(value="0%")
+        self._busy = False
+        self._busy_buttons: list[tk.Widget] = []
 
         self._build_ui()
         self._poll_queue()
@@ -231,6 +272,7 @@ class FloorLoadAutoApp(tk.Tk):
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
+        self.rowconfigure(1, weight=0)
         notebook = ttk.Notebook(self)
         self.notebook = notebook
         notebook.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
@@ -254,6 +296,7 @@ class FloorLoadAutoApp(tk.Tk):
         self._build_dxf_tab()
         self._build_build_tab()
         self._build_log_tab()
+        self._build_progress_status_bar()
 
     def _build_api_tab(self) -> None:
         f = self.tab_api
@@ -274,7 +317,7 @@ class FloorLoadAutoApp(tk.Tk):
         ttk.Checkbutton(f, text="SSL 인증서 검증", variable=self.verify_ssl_var).grid(row=4, column=1, sticky="w", padx=8, pady=8)
         button_frame = ttk.Frame(f)
         button_frame.grid(row=5, column=1, sticky="w", padx=8, pady=12)
-        ttk.Button(button_frame, text="연결 테스트", command=self.test_api).pack(side="left", padx=4)
+        self._busy_button(button_frame, text="연결 테스트", command=self.test_api).pack(side="left", padx=4)
         ttk.Button(button_frame, text="설정 저장", command=self.save_current_config).pack(side="left", padx=4)
         ttk.Button(button_frame, text="기존 v3 Streamlit 실행", command=self.launch_legacy_v3).pack(side="left", padx=4)
         ttk.Label(
@@ -289,12 +332,12 @@ class FloorLoadAutoApp(tk.Tk):
         ttk.Label(f, text="모델 파일(.mgb/.mgbx/.mcb)").grid(row=0, column=0, sticky="w", padx=8, pady=8)
         ttk.Entry(f, textvariable=self.model_path).grid(row=0, column=1, sticky="ew", padx=8, pady=8)
         ttk.Button(f, text="찾기", command=self.select_model_file).grid(row=0, column=2, padx=8, pady=8)
-        ttk.Button(f, text="API로 열기 + MGT Export + Story 읽기", command=self.open_model_and_export).grid(row=1, column=1, sticky="w", padx=8, pady=8)
+        self._busy_button(f, text="API로 열기 + MGT Export + Story 읽기", command=self.open_model_and_export).grid(row=1, column=1, sticky="w", padx=8, pady=8)
 
         ttk.Label(f, text="디버그/오프라인용 MGT 직접 읽기").grid(row=2, column=0, sticky="w", padx=8, pady=8)
         ttk.Entry(f, textvariable=self.exported_mgt_path).grid(row=2, column=1, sticky="ew", padx=8, pady=8)
         ttk.Button(f, text="MGT 찾기", command=self.select_mgt_file).grid(row=2, column=2, padx=8, pady=8)
-        ttk.Button(f, text="선택 MGT에서 Story 읽기", command=self.load_mgt_snapshot).grid(row=3, column=1, sticky="w", padx=8, pady=8)
+        self._busy_button(f, text="선택 MGT에서 Story 읽기", command=self.load_mgt_snapshot).grid(row=3, column=1, sticky="w", padx=8, pady=8)
 
         ttk.Separator(f).grid(row=4, column=0, columnspan=3, sticky="ew", pady=8)
         ttk.Label(f, text="FLOOR LOAD 자동 분석").grid(row=5, column=0, sticky="nw", padx=8, pady=8)
@@ -302,7 +345,7 @@ class FloorLoadAutoApp(tk.Tk):
         self.floorload_status_label.grid(row=5, column=1, columnspan=2, sticky="w", padx=8, pady=8)
         floor_button_frame = ttk.Frame(f)
         floor_button_frame.grid(row=6, column=1, columnspan=2, sticky="w", padx=8, pady=4)
-        ttk.Button(floor_button_frame, text="FLOOR LOAD 존재 여부 재분석", command=self.recheck_floorload_presence).pack(side="left", padx=4)
+        self._busy_button(floor_button_frame, text="FLOOR LOAD 존재 여부 재분석", command=self.recheck_floorload_presence).pack(side="left", padx=4)
         self.open_pdf_tab_button = ttk.Button(floor_button_frame, text="PDF로 하중 입력하기", command=self.open_pdf_tab)
         self.open_pdf_tab_button.pack(side="left", padx=4)
         self.open_pdf_tab_button.state(["disabled"])
@@ -326,7 +369,7 @@ class FloorLoadAutoApp(tk.Tk):
         self.story_tree.bind("<<TreeviewSelect>>", self.on_story_select)
         diag_button_frame = ttk.Frame(f)
         diag_button_frame.grid(row=9, column=1, columnspan=2, sticky="w", padx=8, pady=4)
-        ttk.Button(diag_button_frame, text="모델링 FLOORLOAD 입력 가능성 분석", command=self.run_floorload_diagnostics).pack(side="left", padx=4)
+        self._busy_button(diag_button_frame, text="모델링 FLOORLOAD 입력 가능성 분석", command=self.run_floorload_diagnostics).pack(side="left", padx=4)
         self.open_diag_dxf_button = ttk.Button(diag_button_frame, text="진단 DXF 열기", command=self.open_last_diagnostic_dxf)
         self.open_diag_dxf_button.pack(side="left", padx=4)
         self.open_diag_dxf_button.state(["disabled"])
@@ -373,12 +416,12 @@ class FloorLoadAutoApp(tk.Tk):
         ttk.Button(pdf_button_frame, text="목록 비우기", command=self.clear_pdf_files).pack(fill="x", pady=2)
         f.rowconfigure(1, weight=0)
 
-        ttk.Button(f, text="PDF 분석 및 MGTX 생성", command=self.run_pdf_analysis).grid(row=2, column=1, sticky="w", padx=8, pady=8)
+        self._busy_button(f, text="PDF 분석 및 MGTX 생성", command=self.run_pdf_analysis).grid(row=2, column=1, sticky="w", padx=8, pady=8)
         ttk.Button(f, text="PDF 하중목록 전체 선택", command=self.apply_pdf_loads_to_dxf_layers).grid(row=2, column=1, sticky="e", padx=8, pady=8)
 
         ttk.Label(f, text="생성 MGTX").grid(row=3, column=0, sticky="w", padx=8, pady=8)
         ttk.Entry(f, textvariable=self.pdf_mgtx_path).grid(row=3, column=1, sticky="ew", padx=8, pady=8)
-        ttk.Button(f, text="PDF MGTX를 현재 MGT에 병합", command=self.merge_pdf_mgtx_to_current_mgt).grid(row=3, column=2, sticky="ew", padx=8, pady=8)
+        self._busy_button(f, text="PDF MGTX를 현재 MGT에 병합", command=self.merge_pdf_mgtx_to_current_mgt).grid(row=3, column=2, sticky="ew", padx=8, pady=8)
 
         ttk.Label(f, text="병합 출력 MGT").grid(row=4, column=0, sticky="w", padx=8, pady=8)
         ttk.Entry(f, textvariable=self.pdf_merge_output_path).grid(row=4, column=1, sticky="ew", padx=8, pady=8)
@@ -412,6 +455,11 @@ class FloorLoadAutoApp(tk.Tk):
         ttk.Label(f, text="Story tolerance").grid(row=0, column=0, sticky="w", padx=8, pady=8)
         self.story_tol_var = tk.DoubleVar(value=self.config_data.story_tolerance)
         ttk.Entry(f, textvariable=self.story_tol_var, width=12).grid(row=0, column=1, sticky="w", padx=8, pady=8)
+        hatch_scale_frame = ttk.Frame(f)
+        hatch_scale_frame.grid(row=0, column=2, sticky="e", padx=8, pady=8)
+        ttk.Label(hatch_scale_frame, text="CAD 기본 HATCH 축척").pack(side="left", padx=(0, 4))
+        self.default_hatch_scale_var = tk.StringVar(value=str(self.config_data.default_hatch_scale))
+        ttk.Entry(hatch_scale_frame, textvariable=self.default_hatch_scale_var, width=10).pack(side="left")
 
         ttk.Label(
             f,
@@ -471,15 +519,34 @@ class FloorLoadAutoApp(tk.Tk):
         )
         self.dxf_story_combo.pack(side="left", padx=(0, 8))
         self.dxf_story_combo.bind("<<ComboboxSelected>>", self._on_dxf_story_combo_selected)
-        ttk.Button(dxf_button_frame, text="선택 Story center line DXF 생성", command=self.create_dxf_template).pack(side="left", padx=(0, 8))
-        self.open_generated_dxf_button = ttk.Button(dxf_button_frame, text="생성 DXF 파일 열기", command=self.open_last_generated_dxf)
+        self._busy_button(dxf_button_frame, text="선택 Story center line DXF 생성", command=self.create_dxf_template).pack(side="left", padx=(0, 8))
+        self.open_generated_dxf_button = tk.Button(
+            dxf_button_frame,
+            text="생성 DXF 파일 열기",
+            command=self.open_last_generated_dxf,
+            state="disabled",
+            padx=8,
+            pady=2,
+        )
         self.open_generated_dxf_button.pack(side="left")
-        self.open_generated_dxf_button.state(["disabled"])
+        self._dxf_open_button_defaults = self._capture_button_visual_defaults(self.open_generated_dxf_button)
+        ttk.Label(
+            dxf_button_frame,
+            textvariable=self.dxf_next_action_text_var,
+            foreground="#805000",
+            wraplength=440,
+        ).pack(side="left", padx=(8, 0))
         ttk.Separator(f).grid(row=4, column=0, columnspan=3, sticky="ew", pady=8)
         ttk.Label(f, text="사용자 작성 DXF").grid(row=5, column=0, sticky="w", padx=8, pady=8)
         ttk.Entry(f, textvariable=self.user_dxf_path).grid(row=5, column=1, sticky="ew", padx=8, pady=8)
         ttk.Button(f, text="찾기", command=self.select_user_dxf).grid(row=5, column=2, padx=8, pady=8)
-        ttk.Button(f, text="DXF 검증", command=self.validate_user_dxf).grid(row=6, column=0, sticky="w", padx=8, pady=8)
+        ttk.Label(f, text="전층 DXF layout metadata").grid(row=6, column=0, sticky="w", padx=8, pady=8)
+        ttk.Entry(f, textvariable=self.layout_metadata_path).grid(row=6, column=1, sticky="ew", padx=8, pady=8)
+        metadata_button_frame = ttk.Frame(f)
+        metadata_button_frame.grid(row=6, column=2, sticky="ew", padx=8, pady=8)
+        ttk.Button(metadata_button_frame, text="선택", command=self.select_layout_metadata_file).pack(side="left", padx=(0, 4))
+        ttk.Button(metadata_button_frame, text="자동 찾기", command=self.auto_find_layout_metadata).pack(side="left")
+        self._busy_button(f, text="DXF 검증", command=self.validate_user_dxf).grid(row=7, column=0, sticky="w", padx=8, pady=8)
         self.dxf_tree = ttk.Treeview(
             f,
             columns=(
@@ -533,9 +600,9 @@ class FloorLoadAutoApp(tk.Tk):
         self.dxf_tree.column("model_bbox", width=165)
         self.dxf_tree.heading("source_id", text="source_id")
         self.dxf_tree.column("source_id", width=110)
-        self.dxf_tree.grid(row=7, column=0, columnspan=3, sticky="nsew", padx=8, pady=8)
+        self.dxf_tree.grid(row=8, column=0, columnspan=3, sticky="nsew", padx=8, pady=8)
         f.rowconfigure(2, weight=2)
-        f.rowconfigure(7, weight=1)
+        f.rowconfigure(8, weight=1)
         self._refresh_model_load_checklist()
         self._refresh_pdf_load_checklist()
         self._refresh_final_load_tree()
@@ -584,14 +651,237 @@ class FloorLoadAutoApp(tk.Tk):
         ttk.Label(f, text="결과 .mgbx 저장 경로").grid(row=2, column=0, sticky="w", padx=8, pady=8)
         ttk.Entry(f, textvariable=self.target_model_path).grid(row=2, column=1, sticky="ew", padx=8, pady=8)
         ttk.Button(f, text="저장 위치", command=self.select_target_model).grid(row=2, column=2, padx=8, pady=8)
-        ttk.Button(f, text="full MGT 생성 + 새 모델 import/save as", command=self.build_and_import).grid(row=3, column=1, sticky="w", padx=8, pady=12)
-        ttk.Button(f, text="API import 없이 full MGT만 생성", command=self.build_mgt_only).grid(row=3, column=1, sticky="e", padx=8, pady=12)
+        build_button_frame = ttk.Frame(f)
+        build_button_frame.grid(row=3, column=1, columnspan=2, sticky="w", padx=8, pady=12)
+        self._busy_button(build_button_frame, text="full MGT 생성 + 새 모델 import/save as", command=self.build_and_import).pack(side="left", padx=(0, 8))
+        self._busy_button(build_button_frame, text="API import 없이 full MGT만 생성", command=self.build_mgt_only).pack(side="left", padx=(0, 8))
+        self.open_generated_model_button = tk.Button(
+            build_button_frame,
+            text="생성 모델링 파일 열기",
+            command=self.open_generated_model_file,
+            state="disabled",
+            padx=8,
+            pady=2,
+        )
+        self.open_generated_model_button.pack(side="left")
+        self._model_open_button_defaults = self._capture_button_visual_defaults(self.open_generated_model_button)
+        ttk.Label(f, textvariable=self.model_next_action_text_var, foreground="#2f6b2f", wraplength=900).grid(
+            row=4,
+            column=0,
+            columnspan=3,
+            sticky="w",
+            padx=8,
+            pady=(0, 4),
+        )
         self.result_label = ttk.Label(f, text="결과 파일: -", foreground="blue", wraplength=900)
-        self.result_label.grid(row=4, column=0, columnspan=3, sticky="w", padx=8, pady=8)
+        self.result_label.grid(row=5, column=0, columnspan=3, sticky="w", padx=8, pady=8)
 
     def _build_log_tab(self) -> None:
         self.log_text = tk.Text(self.tab_log, height=25)
         self.log_text.pack(fill="both", expand=True, padx=8, pady=8)
+
+    def _build_progress_status_bar(self) -> None:
+        frame = ttk.Frame(self)
+        frame.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
+        frame.columnconfigure(2, weight=1)
+        ttk.Label(frame, text="상태:").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        ttk.Label(frame, textvariable=self.progress_text_var, width=28).grid(row=0, column=1, sticky="w", padx=(0, 8))
+        self.progress_bar = ttk.Progressbar(
+            frame,
+            variable=self.progress_var,
+            maximum=100.0,
+            mode="determinate",
+        )
+        self.progress_bar.grid(row=0, column=2, sticky="ew", padx=(0, 8))
+        ttk.Label(frame, textvariable=self.progress_percent_var, width=6, anchor="e").grid(row=0, column=3, sticky="e")
+
+    def _busy_button(self, parent, **kwargs):
+        button = ttk.Button(parent, **kwargs)
+        self._register_busy_button(button)
+        return button
+
+    def _register_busy_button(self, button):
+        self._busy_buttons.append(button)
+        return button
+
+    def _set_busy(self, busy: bool, message: str | None = None) -> None:
+        self._busy = bool(busy)
+        for button in self._busy_buttons:
+            try:
+                button.state(["disabled"] if busy else ["!disabled"])
+            except Exception:
+                try:
+                    button.configure(state="disabled" if busy else "normal")
+                except Exception:
+                    pass
+        if message:
+            self.progress_text_var.set(message)
+
+    def _capture_button_visual_defaults(self, button) -> dict[str, object]:
+        defaults: dict[str, object] = {}
+        for option in ("background", "activebackground", "foreground", "relief"):
+            try:
+                defaults[option] = button.cget(option)
+            except Exception:
+                pass
+        return defaults
+
+    def _set_button_enabled(self, button, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        try:
+            state_method = getattr(button, "state")
+        except Exception:
+            state_method = None
+        if callable(state_method):
+            try:
+                state_method(["!disabled"] if enabled else ["disabled"])
+                return
+            except Exception:
+                pass
+        try:
+            button.configure(state=state)
+        except Exception:
+            pass
+
+    def _configure_next_action_button(
+        self,
+        button,
+        *,
+        enabled: bool,
+        text: str,
+        defaults: dict[str, object] | None = None,
+        background: str | None = None,
+        activebackground: str | None = None,
+    ) -> None:
+        try:
+            button.configure(text=text)
+        except Exception:
+            pass
+        self._set_button_enabled(button, enabled)
+        if background:
+            for option, value in (("background", background), ("activebackground", activebackground or background), ("relief", "raised")):
+                try:
+                    button.configure(**{option: value})
+                except Exception:
+                    pass
+            return
+        for option, value in (defaults or {}).items():
+            try:
+                button.configure(**{option: value})
+            except Exception:
+                pass
+
+    def _short_ui_message(self, message: str, *, limit: int = 220) -> str:
+        text = " ".join(str(message or "").split())
+        if len(text) <= limit:
+            return text
+        return text[: limit - 3].rstrip() + "..."
+
+    def _reset_dxf_next_action_state(self, message: str = "DXF 생성 중입니다. 완료 후 파일 열기 버튼이 활성화됩니다.") -> None:
+        self.last_generated_dxf_path = None
+        if hasattr(self, "generated_dxf_path"):
+            self.generated_dxf_path.set("")
+        if hasattr(self, "open_generated_dxf_button"):
+            self._configure_next_action_button(
+                self.open_generated_dxf_button,
+                enabled=False,
+                text="생성 DXF 파일 열기",
+                defaults=getattr(self, "_dxf_open_button_defaults", None),
+            )
+        if hasattr(self, "dxf_next_action_text_var"):
+            self.dxf_next_action_text_var.set(message)
+
+    def _mark_dxf_generated_success(self, path: str | Path) -> None:
+        generated_path = Path(path)
+        self.last_generated_dxf_path = generated_path
+        if hasattr(self, "generated_dxf_path"):
+            self.generated_dxf_path.set(str(generated_path))
+        if hasattr(self, "open_generated_dxf_button"):
+            self._configure_next_action_button(
+                self.open_generated_dxf_button,
+                enabled=True,
+                text="생성 DXF 파일 열기 >>",
+                defaults=getattr(self, "_dxf_open_button_defaults", None),
+                background=DXF_NEXT_ACTION_BG,
+                activebackground=DXF_NEXT_ACTION_ACTIVE_BG,
+            )
+        if hasattr(self, "dxf_next_action_text_var"):
+            self.dxf_next_action_text_var.set("DXF 생성 완료. 다음 단계: 생성 DXF 파일 열기를 눌러 CAD에서 하중 위치를 작성하세요.")
+
+    def _mark_dxf_generated_failed(self, message: str = "") -> None:
+        text = "DXF 생성 실패. 로그를 확인하세요."
+        if message:
+            text = f"DXF 생성 실패: {self._short_ui_message(message)}"
+        self._reset_dxf_next_action_state(text)
+
+    def _reset_model_next_action_state(self, message: str = "모델링 파일 생성 중입니다. 완료 후 파일 열기 버튼이 활성화됩니다.") -> None:
+        self.last_generated_model_path = None
+        if hasattr(self, "generated_model_path"):
+            self.generated_model_path.set("")
+        if hasattr(self, "open_generated_model_button"):
+            self._configure_next_action_button(
+                self.open_generated_model_button,
+                enabled=False,
+                text="생성 모델링 파일 열기",
+                defaults=getattr(self, "_model_open_button_defaults", None),
+            )
+        if hasattr(self, "model_next_action_text_var"):
+            self.model_next_action_text_var.set(message)
+
+    def _mark_model_generated_success(self, path: str | Path) -> None:
+        generated_path = Path(path)
+        self.last_generated_model_path = generated_path
+        if hasattr(self, "generated_model_path"):
+            self.generated_model_path.set(str(generated_path))
+        if hasattr(self, "target_model_path"):
+            self.target_model_path.set(str(generated_path))
+        if hasattr(self, "open_generated_model_button"):
+            self._configure_next_action_button(
+                self.open_generated_model_button,
+                enabled=True,
+                text="생성 모델링 파일 열기 >>",
+                defaults=getattr(self, "_model_open_button_defaults", None),
+                background=MODEL_NEXT_ACTION_BG,
+                activebackground=MODEL_NEXT_ACTION_ACTIVE_BG,
+            )
+        if hasattr(self, "model_next_action_text_var"):
+            self.model_next_action_text_var.set("모델링 파일 생성 완료. 생성 모델링 파일 열기를 눌러 결과 모델을 확인하세요.")
+
+    def _mark_model_generated_failed(self, message: str = "") -> None:
+        text = "모델링 파일 생성 실패. 로그를 확인하세요."
+        if message:
+            text = f"모델링 파일 생성 실패: {self._short_ui_message(message)}"
+        self._reset_model_next_action_state(text)
+
+    def _mark_model_not_generated(self, message: str = "모델링 파일은 생성되지 않았습니다.") -> None:
+        self._reset_model_next_action_state(message)
+
+    def _set_progress(self, percent: float, message: str = "") -> None:
+        try:
+            value = max(0.0, min(100.0, float(percent)))
+        except Exception:
+            value = 0.0
+        self.progress_var.set(value)
+        self.progress_percent_var.set(f"{value:.0f}%")
+        if message:
+            self.progress_text_var.set(message)
+        try:
+            self.update_idletasks()
+        except Exception:
+            pass
+
+    def _start_progress(self, message: str) -> None:
+        self._set_progress(0.0, message)
+
+    def _finish_progress(self, message: str = "완료") -> None:
+        self._set_progress(100.0, message)
+
+    def _error_progress(self, message: str = "오류") -> None:
+        self.progress_text_var.set(message)
+        try:
+            self.update_idletasks()
+        except Exception:
+            pass
 
     # ---------------------------------------------------------------- actions
     def _client(self) -> MidasGenApiClient:
@@ -606,6 +896,9 @@ class FloorLoadAutoApp(tk.Tk):
             timeout_seconds=int(self.timeout_var.get()),
             verify_ssl=bool(self.verify_ssl_var.get()),
             story_tolerance=float(self.story_tol_var.get() if hasattr(self, "story_tol_var") else self.config_data.story_tolerance),
+            default_hatch_scale=normalize_hatch_scale(
+                self.default_hatch_scale_var.get() if hasattr(self, "default_hatch_scale_var") else self.config_data.default_hatch_scale
+            ),
             snap_tolerance=float(self.snap_tol_var.get() if hasattr(self, "snap_tol_var") else self.config_data.snap_tolerance),
             include_zero_load=bool(self.include_zero_var.get() if hasattr(self, "include_zero_var") else self.config_data.include_zero_load),
         )
@@ -665,9 +958,12 @@ class FloorLoadAutoApp(tk.Tk):
             messagebox.showwarning("MGT 없음", "먼저 모델을 API로 열어 MGT를 export하거나 MGT 파일을 직접 읽어 주세요.")
             return
 
-        def job():
+        def job(progress):
+            progress.update(15.0, "MGT 파일 읽는 중")
             _stories, _nodes, _elements, text = parse_mgt_file(path)
+            progress.update(55.0, "FLOOR LOAD 존재 여부 분석 중")
             presence = detect_floor_load_presence_from_text(text)
+            progress.update(80.0, "하중 목록 갱신 중")
             self.queue.put(("floorload_status", presence))
             self.queue.put(("model_load_items", self._model_specs_from_mgt_text(text)))
             return presence.message
@@ -679,22 +975,26 @@ class FloorLoadAutoApp(tk.Tk):
             messagebox.showwarning("PDF 없음", "분석할 구조계산서 PDF를 먼저 추가해 주세요.")
             return
 
-        def job():
+        def job(progress):
+            progress.update(10.0, "PDF 분석 작업 폴더 준비 중")
             project_dir = self._ensure_current_project_workspace()
             model_stem = safe_filename(project_dir.name)
             pdf_jobs_dir = self.current_project_subdirs["pdf_jobs"]
+            progress.update(25.0, "PDF 하중 분석 중")
             result = run_pdf_load_import(
                 pdf_paths=self.selected_pdf_paths,
                 root_dir=self.root_dir,
                 output_root=pdf_jobs_dir,
                 job_name=f"{model_stem}_pdf_load",
             )
+            progress.update(80.0, "PDF 분석 결과 정리 중")
             self.pdf_import_result = result
             if result.mgtx_path:
                 self.pdf_mgtx_path.set(str(result.mgtx_path))
                 default_merge = self.current_project_subdirs["mgt"] / f"{model_stem}_pdf_load_types_merged.mgt"
                 self.pdf_merge_output_path.set(str(default_merge))
             self.queue.put(("pdf_rows", result))
+            progress.update(90.0, "PDF 결과 UI 반영 중")
             valid_count = len(result.valid_rows)
             error_count = len(result.error_rows)
             return f"PDF 분석 완료: 유효 {valid_count}개, 검토/제외 {error_count}개, MGTX={result.mgtx_path or '생성 안 됨'}"
@@ -729,15 +1029,18 @@ class FloorLoadAutoApp(tk.Tk):
             messagebox.showwarning("출력 경로 없음", "병합 출력 MGT 경로가 비어 있습니다.")
             return
 
-        def job():
+        def job(progress):
+            progress.update(15.0, "PDF MGTX 병합 중")
             result = merge_pdf_mgtx_into_full_mgt(
                 source_mgt_path=source_mgt,
                 pdf_mgtx_path=pdf_mgtx,
                 output_mgt_path=output_mgt,
                 collision_mode="skip_existing",
             )
+            progress.update(60.0, "병합 MGT 다시 읽는 중")
             self.exported_mgt_path.set(str(result.output_mgt_path))
             _stories, _nodes, _elements, text = parse_mgt_file(result.output_mgt_path)
+            progress.update(80.0, "병합 결과 분석 중")
             presence = detect_floor_load_presence_from_text(text)
             self.queue.put(("floorload_status", presence))
             self.queue.put(("model_load_items", self._model_specs_from_mgt_text(text)))
@@ -759,6 +1062,22 @@ class FloorLoadAutoApp(tk.Tk):
         if path:
             self.mapping_path.set(path)
 
+    def select_layout_metadata_file(self) -> None:
+        path = filedialog.askopenfilename(filetypes=[("Layout metadata", "*.layout_metadata.json *.json"), ("All files", "*.*")])
+        if path:
+            self.layout_metadata_path.set(path)
+
+    def auto_find_layout_metadata(self) -> None:
+        dxf = self.user_dxf_path.get().strip()
+        if not dxf:
+            messagebox.showwarning("DXF 선택", "먼저 사용자 작성 DXF 파일을 선택해 주세요.")
+            return
+        selected = self._resolve_layout_metadata_for_dxf(dxf, allow_prompt=True)
+        if selected:
+            messagebox.showinfo("layout metadata", f"layout metadata를 선택했습니다.\n\n{selected}")
+        else:
+            messagebox.showinfo("layout metadata", "자동으로 선택할 layout metadata가 없습니다. 단일층 DXF라면 그대로 진행해도 됩니다.")
+
     def select_target_model(self) -> None:
         path = filedialog.asksaveasfilename(
             defaultextension=".mgbx",
@@ -773,14 +1092,19 @@ class FloorLoadAutoApp(tk.Tk):
             messagebox.showwarning("모델 선택", "모델 파일을 먼저 선택해 주세요.")
             return
 
-        def job():
+        def job(progress):
+            progress.update(10.0, "MIDAS API 클라이언트 준비 중")
             client = self._client()
+            progress.update(25.0, "모델 열기 중")
             client.open_project(model)
+            progress.update(45.0, "MGT Export 준비 중")
             self._ensure_current_project_workspace(Path(model).stem)
             out = self.current_project_subdirs["mgt"] / f"{Path(model).stem}_exported.mgt"
+            progress.update(60.0, "MGT Export 요청 중")
             client.export_mgt(out)
+            progress.update(75.0, "MGT 파일 파싱 중")
             self.exported_mgt_path.set(str(out))
-            self._load_mgt_snapshot_impl(out)
+            self._load_mgt_snapshot_impl(out, progress=progress)
             return f"모델 열기 및 MGT export 완료: {out}"
 
         self.run_worker("모델 열기/MGT Export", job)
@@ -790,20 +1114,28 @@ class FloorLoadAutoApp(tk.Tk):
         if not path:
             messagebox.showwarning("MGT 선택", "MGT/MGTX 파일을 선택해 주세요.")
             return
-        self.run_worker("MGT 읽기", lambda: self._load_mgt_snapshot_impl(Path(path)))
+        self.run_worker("MGT 읽기", lambda progress: self._load_mgt_snapshot_impl(Path(path), progress=progress))
 
-    def _load_mgt_snapshot_impl(self, path: str | Path):
+    def _load_mgt_snapshot_impl(self, path: str | Path, progress: ProgressReporter | None = None):
+        if progress:
+            progress.update(15.0, "작업 폴더 준비 중")
         if self.current_project_dir:
             self._ensure_current_project_workspace()
         else:
             self._ensure_current_project_workspace(Path(path).stem)
+        if progress:
+            progress.update(35.0, "MGT 파일 읽는 중")
         stories, nodes, elements, mgt_text = parse_mgt_file(path)
         if not stories:
             raise RuntimeError("Story 정보가 없습니다. MGT의 *STORY 블록 또는 API STOR 데이터를 확인해 주세요.")
+        if progress:
+            progress.update(70.0, "Story/Node/Element 반영 중")
         self.stories = stories
         self.nodes = nodes
         self.elements = elements
         self.queue.put(("stories", stories))
+        if progress:
+            progress.update(85.0, "FLOOR LOAD 존재 여부 분석 중")
         self.queue.put(("floorload_status", detect_floor_load_presence_from_text(mgt_text)))
         self.queue.put(("model_load_items", self._model_specs_from_mgt_text(mgt_text)))
         return f"Story {len(stories)}개, Node {len(nodes)}개, Element {len(elements)}개를 읽었습니다."
@@ -832,16 +1164,19 @@ class FloorLoadAutoApp(tk.Tk):
                 "최종 적용 하중목록이 비어 있습니다. 모델링 입력 하중목록 또는 PDF 하중목록에서 적용할 하중을 체크해 주세요.",
             )
             return
-        self.last_generated_dxf_path = None
-        if hasattr(self, "open_generated_dxf_button"):
-            self.open_generated_dxf_button.state(["disabled"])
+        self._reset_dxf_next_action_state()
+        default_hatch_scale = normalize_hatch_scale(
+            self.default_hatch_scale_var.get() if hasattr(self, "default_hatch_scale_var") else self.config_data.default_hatch_scale
+        )
 
-        def job():
+        def job(progress):
+            progress.update(10.0, "DXF 생성 작업 폴더 준비 중")
             model_name = Path(self.model_path.get() or self.exported_mgt_path.get() or "model").stem
             self._ensure_current_project_workspace()
             out_dir = self.current_project_subdirs["dxf_templates"]
             test_path = out_dir / ".write_test.tmp"
             try:
+                progress.update(20.0, "DXF 출력 권한 확인 중")
                 test_path.write_text("test", encoding="utf-8")
                 if test_path.exists():
                     test_path.unlink()
@@ -856,6 +1191,7 @@ class FloorLoadAutoApp(tk.Tk):
             base_out = out_dir / f"{safe_filename(model_name)}_{safe_filename(story_part)}_floorload_template.dxf"
             out = unique_output_path(base_out)
             if story_mode == ALL_STORIES_VALUE:
+                progress.update(35.0, "전체 Story DXF geometry 생성 중")
                 result = write_all_story_centerline_dxf(
                     output_path=out,
                     stories=self.stories,
@@ -863,8 +1199,10 @@ class FloorLoadAutoApp(tk.Tk):
                     elements=self.elements,
                     load_layers=specs,
                     story_tolerance=float(self.story_tol_var.get()),
+                    default_hatch_scale=default_hatch_scale,
                 )
             else:
+                progress.update(35.0, "Story center line DXF geometry 생성 중")
                 result = write_story_centerline_dxf(
                     output_path=out,
                     story=story,
@@ -872,7 +1210,9 @@ class FloorLoadAutoApp(tk.Tk):
                     elements=self.elements,
                     load_layers=specs,
                     story_tolerance=float(self.story_tol_var.get()),
+                    default_hatch_scale=default_hatch_scale,
                 )
+            progress.update(90.0, "DXF 템플릿 결과 정리 중")
             return result
 
         self.run_worker("DXF 템플릿 생성", job)
@@ -882,18 +1222,24 @@ class FloorLoadAutoApp(tk.Tk):
         if not dxf:
             messagebox.showwarning("DXF 선택", "사용자가 작성한 DXF 파일을 선택해 주세요.")
             return
+        layout_metadata = self._resolve_layout_metadata_for_dxf(dxf, allow_prompt=True)
 
-        def job():
+        def job(progress):
+            progress.update(15.0, "DXF 검증 작업 폴더 준비 중")
             self._ensure_current_project_workspace()
+            progress.update(30.0, "DXF HATCH/Polyline 읽는 중")
             regions = read_load_regions(
                 dxf,
                 mapping_path=self.mapping_path.get().strip() or None,
-                metadata_search_dirs=[self.current_project_subdirs["dxf_templates"]],
+                layout_metadata_path=layout_metadata,
+                project_dxf_templates_dir=self.current_project_subdirs["dxf_templates"],
             )
+            progress.update(80.0, "DXF 검증 결과 반영 중")
             self.loaded_regions = regions
             self.queue.put(("regions", regions))
             if not regions:
                 raise RuntimeError("선택한 DXF에서 하중 해치를 찾지 못했습니다. 하중 영역을 HATCH로 작성하거나 폐합 Polyline을 사용해 주세요.")
+            progress.update(90.0, "DXF 검증 요약 생성 중")
             return _format_dxf_validation_summary(regions)
 
         self.run_worker("DXF 검증", job)
@@ -903,9 +1249,11 @@ class FloorLoadAutoApp(tk.Tk):
             messagebox.showwarning("모델 데이터 없음", "먼저 API로 모델을 열거나 MGT/MGTX에서 Story, Node, Element를 읽어 주세요.")
             return
 
-        def job():
+        def job(progress):
+            progress.update(15.0, "진단 작업 폴더 준비 중")
             self._ensure_current_project_workspace()
             reports_dir = self.current_project_subdirs["reports"]
+            progress.update(30.0, "FLOORLOAD 모델링 진단 중")
             issues = analyze_floorload_model(
                 nodes=self.nodes,
                 elements=self.elements,
@@ -914,11 +1262,14 @@ class FloorLoadAutoApp(tk.Tk):
                 story_tolerance=float(self.story_tol_var.get()),
                 snap_tolerance=float(self.snap_tol_var.get() if hasattr(self, "snap_tol_var") else self.config_data.snap_tolerance),
             )
+            progress.update(70.0, "진단 보고서 저장 중")
             json_path, csv_path = write_diagnostic_reports(issues, reports_dir)
+            progress.update(85.0, "진단 DXF 생성 중")
             dxf_path = write_floorload_diagnostic_dxf(output_path=reports_dir / "floorload_diagnostics_all.dxf", issues=issues)
             self.last_diagnostic_dxf_path = dxf_path
             self.last_diagnostic_report_path = csv_path
             self.queue.put(("diagnostics", issues))
+            progress.update(92.0, "진단 결과 UI 반영 중")
             return f"FLOORLOAD 모델링 진단 완료: {len(issues)}개 이슈\nDXF: {dxf_path}\nCSV: {csv_path}\nJSON: {json_path}"
 
         self.run_worker("FLOORLOAD 모델링 진단", job)
@@ -944,14 +1295,25 @@ class FloorLoadAutoApp(tk.Tk):
         if not dxf:
             messagebox.showwarning("DXF 없음", "사용자가 작성한 DXF 파일을 선택하고 검증해 주세요.")
             return
+        layout_metadata = self.layout_metadata_path.get().strip() or None
+        if not self.loaded_regions:
+            layout_metadata = self._resolve_layout_metadata_for_dxf(dxf, allow_prompt=True)
+        if import_to_midas:
+            self._reset_model_next_action_state()
+        else:
+            self._mark_model_not_generated("API import 없이 full MGT만 생성하는 작업입니다. 모델링 파일 열기 버튼은 비활성화됩니다.")
 
-        def job():
+        def job(progress):
+            progress.update(10.0, "MGT 생성 작업 폴더 준비 중")
             self._ensure_current_project_workspace()
+            progress.update(20.0, "DXF 하중 영역 확인 중")
             regions = self.loaded_regions or read_load_regions(
                 dxf,
                 mapping_path=self.mapping_path.get().strip() or None,
-                metadata_search_dirs=[self.current_project_subdirs["dxf_templates"]],
+                layout_metadata_path=layout_metadata,
+                project_dxf_templates_dir=self.current_project_subdirs["dxf_templates"],
             )
+            progress.update(35.0, "Story node set 준비 중")
             story_nodes_by_name = None
             if any(getattr(region.region, "story_name", "") for region in regions):
                 story_nodes_by_name = {
@@ -969,6 +1331,7 @@ class FloorLoadAutoApp(tk.Tk):
             reports_dir = self.current_project_subdirs["reports"]
             out_mgt = mgt_dir / f"{safe_filename(model_stem)}_{safe_filename(story.name)}_floorload_full.mgt"
             preview = reports_dir / f"{safe_filename(model_stem)}_{safe_filename(story.name)}_floorload_preview.dxf"
+            progress.update(50.0, "FLOORLOAD assignment 및 full MGT 생성 중")
             result = run_mgt_build_pipeline(
                 source_mgt_path=mgt,
                 output_mgt_path=out_mgt,
@@ -984,23 +1347,33 @@ class FloorLoadAutoApp(tk.Tk):
                 story_nodes_by_name=story_nodes_by_name,
                 mode="append",
             )
+            progress.update(75.0, "MGT/보고서/검증 DXF 저장 확인 중")
             if import_to_midas:
                 target = self.target_model_path.get().strip()
                 if not target:
-                    target = str(model_dir / f"{safe_filename(model_stem)}_{safe_filename(story.name)}_floorload_added.mgbx")
+                    target_path = model_dir / f"{safe_filename(model_stem)}_{safe_filename(story.name)}_floorload_added.mgbx"
                 else:
-                    target = str(_mgbx_path(target))
-                self.target_model_path.set(target)
-                if not target:
+                    target_path = _mgbx_path(target)
+                target_path = unique_numbered_path(target_path, start=2)
+                self.target_model_path.set(str(target_path))
+                if not target_path:
                     raise RuntimeError("결과 .mgbx 저장 경로가 비어 있습니다.")
+                progress.update(82.0, "MIDAS 새 프로젝트 생성 중")
                 client = self._client()
                 client.new_project()
+                progress.update(88.0, "MIDAS MGT import 중")
                 client.import_mgt(result.full_mgt_path)
-                saved = client.save_as_project(target)
-                return f"full MGT 생성 및 새 모델 저장 완료\nMGT: {result.full_mgt_path}\n모델: {saved}\n보고서: {result.report_xlsx_path}\n검증 DXF: {result.preview_dxf_path}"
-            return f"full MGT 생성 완료(API import 미실행)\nMGT: {result.full_mgt_path}\n보고서: {result.report_xlsx_path}\n검증 DXF: {result.preview_dxf_path}"
+                progress.update(94.0, "최종 MGBX 저장 중")
+                saved = client.save_as_project(target_path)
+                return BuildPipelineUiResult(
+                    f"full MGT 생성 및 새 모델 저장 완료\nMGT: {result.full_mgt_path}\n모델: {saved}\n보고서: {result.report_xlsx_path}\n검증 DXF: {result.preview_dxf_path}",
+                    generated_model_path=saved,
+                )
+            return BuildPipelineUiResult(
+                f"full MGT 생성 완료(API import 미실행)\nMGT: {result.full_mgt_path}\n보고서: {result.report_xlsx_path}\n검증 DXF: {result.preview_dxf_path}"
+            )
 
-        self.run_worker("MGT 생성/import", job)
+        self.run_worker("MGT 생성/import" if import_to_midas else "MGT 생성", job)
 
     def launch_legacy_v3(self) -> None:
         app_path = self.root_dir / "legacy_v3" / "streamlit_app.py"
@@ -1206,11 +1579,10 @@ class FloorLoadAutoApp(tk.Tk):
             self.pdf_load_lines_listbox.insert("end", str(item["line"]))
 
     def _handle_dxf_template_result(self, result) -> None:
-        self.last_generated_dxf_path = Path(result.dxf_path)
+        self._mark_dxf_generated_success(result.dxf_path)
         self.mapping_path.set(str(result.mapping_json_path))
-        if hasattr(self, "open_generated_dxf_button"):
-            self.open_generated_dxf_button.state(["!disabled"])
         if getattr(result, "layout_metadata_path", None):
+            self.layout_metadata_path.set(str(result.layout_metadata_path))
             self.log(f"DXF layout metadata: {result.layout_metadata_path}")
         messagebox.showinfo(
             "DXF 템플릿 생성 완료",
@@ -1222,25 +1594,55 @@ class FloorLoadAutoApp(tk.Tk):
             detail=(f"layout metadata: {result.layout_metadata_path}" if getattr(result, "layout_metadata_path", None) else ""),
         )
 
-    def _open_path_with_default_app(self, path: Path) -> None:
-        if sys.platform.startswith("win"):
+    def _handle_mgt_build_result(self, result) -> None:
+        self.result_label.configure(text=f"결과 파일: {result}")
+        generated_model_path = getattr(result, "generated_model_path", None)
+        if generated_model_path:
+            self._mark_model_generated_success(generated_model_path)
+        else:
+            self._mark_model_not_generated("full MGT 생성 완료. API import/save as를 실행하지 않아 모델링 파일은 생성되지 않았습니다.")
+
+    def _launch_file_with_default_app(self, path: Path) -> None:
+        if os.name == "nt":
             os.startfile(str(path))  # type: ignore[attr-defined]
             return
         if sys.platform == "darwin":
-            subprocess.run(["open", str(path)], check=True)
+            subprocess.Popen(["open", str(path)])
             return
-        subprocess.run(["xdg-open", str(path)], check=True)
+        subprocess.Popen(["xdg-open", str(path)])
+
+    def _open_file_with_default_app(self, path: str | Path, *, title: str = "파일 열기") -> bool:
+        target = Path(path)
+        if not target.exists():
+            messagebox.showerror("파일 없음", f"파일을 찾을 수 없습니다:\n{target}")
+            return False
+        try:
+            self._launch_file_with_default_app(target)
+            return True
+        except Exception as exc:  # noqa: BLE001 - OS shell open failures should be visible
+            if hasattr(self, "logger"):
+                self.logger.exception("failed to open file with default app")
+            messagebox.showerror(f"{title} 실패", str(exc))
+            return False
+
+    def _open_path_with_default_app(self, path: Path) -> None:
+        self._open_file_with_default_app(path)
 
     def open_last_generated_dxf(self) -> None:
-        path = self.last_generated_dxf_path
-        if not path or not path.exists():
+        path_text = self.generated_dxf_path.get().strip() if hasattr(self, "generated_dxf_path") else ""
+        path = Path(path_text) if path_text else self.last_generated_dxf_path
+        if not path:
             messagebox.showwarning("DXF 파일 없음", "열 수 있는 DXF 파일이 없습니다. 먼저 DXF를 생성해 주세요.")
             return
-        try:
-            self._open_path_with_default_app(path)
-        except Exception as exc:  # noqa: BLE001 - surface OS open failures to users
-            self.logger.exception("failed to open generated DXF")
-            messagebox.showerror("DXF 열기 실패", f"생성된 DXF 파일을 열지 못했습니다.\n\n{exc}")
+        self._open_file_with_default_app(path, title="DXF 열기")
+
+    def open_generated_model_file(self) -> None:
+        path_text = self.generated_model_path.get().strip() if hasattr(self, "generated_model_path") else ""
+        path = Path(path_text) if path_text else self.last_generated_model_path
+        if not path:
+            messagebox.showwarning("모델링 파일 없음", "열 수 있는 모델링 파일이 없습니다. 먼저 full MGT 생성 + 새 모델 import/save as를 실행해 주세요.")
+            return
+        self._open_file_with_default_app(path, title="모델링 파일 열기")
 
     def open_last_diagnostic_dxf(self) -> None:
         path = self.last_diagnostic_dxf_path
@@ -1255,6 +1657,119 @@ class FloorLoadAutoApp(tk.Tk):
             messagebox.showwarning("진단 보고서 없음", "먼저 모델링 FLOORLOAD 입력 가능성 분석을 실행해 주세요.")
             return
         self._open_path_with_default_app(path)
+
+    def _resolve_layout_metadata_for_dxf(self, dxf: str | Path, *, allow_prompt: bool) -> str | None:
+        self._ensure_current_project_workspace()
+        explicit_text = self.layout_metadata_path.get().strip() if hasattr(self, "layout_metadata_path") else ""
+        explicit = Path(explicit_text) if explicit_text else None
+        selection = select_layout_metadata(
+            dxf_path=Path(dxf),
+            explicit_path=explicit,
+            project_dxf_templates_dir=self.current_project_subdirs.get("dxf_templates"),
+            project_root=self.current_project_dir,
+        )
+        if selection.selected_path:
+            selected = str(selection.selected_path)
+            self.layout_metadata_path.set(selected)
+            self.log(
+                "layout metadata 선택: "
+                f"{selection.reason}, {selected}"
+            )
+            return selected
+        if selection.selection_required and allow_prompt:
+            selected_path = self._prompt_layout_metadata_candidate(selection)
+            if selected_path:
+                self.layout_metadata_path.set(str(selected_path))
+                self.log(f"layout metadata 사용자 선택: {selected_path}")
+                return str(selected_path)
+        return None
+
+    def _prompt_layout_metadata_candidate(self, selection: LayoutMetadataSelection) -> Path | None:
+        if not selection.candidates:
+            path = filedialog.askopenfilename(filetypes=[("Layout metadata", "*.layout_metadata.json *.json"), ("All files", "*.*")])
+            return Path(path) if path else None
+
+        dialog = tk.Toplevel(self)
+        dialog.title("layout metadata 선택")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.geometry("920x360")
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(1, weight=1)
+        ttk.Label(
+            dialog,
+            text="전층 DXF layout metadata 후보가 여러 개입니다. 사용할 metadata를 선택해 주세요.",
+        ).grid(row=0, column=0, sticky="w", padx=10, pady=(10, 4))
+        tree = ttk.Treeview(
+            dialog,
+            columns=("file", "folder", "stories", "score", "matches", "mtime"),
+            show="headings",
+            height=10,
+        )
+        for col, text, width in (
+            ("file", "파일명", 220),
+            ("folder", "폴더", 330),
+            ("stories", "Story", 70),
+            ("score", "Score", 80),
+            ("matches", "Label 일치", 90),
+            ("mtime", "수정시간", 150),
+        ):
+            tree.heading(col, text=text)
+            tree.column(col, width=width, anchor="w")
+        by_item: dict[str, Path] = {}
+        for item in selection.candidates:
+            path = Path(item.path)
+            details = item.details
+            try:
+                modified = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            except OSError:
+                modified = ""
+            item_id = tree.insert(
+                "",
+                "end",
+                values=(
+                    path.name,
+                    str(path.parent),
+                    details.get("story_count", ""),
+                    f"{item.score:.1f}",
+                    details.get("label_match_count", ""),
+                    modified,
+                ),
+            )
+            by_item[item_id] = path
+        first = tree.get_children()
+        if first:
+            tree.selection_set(first[0])
+            tree.focus(first[0])
+        tree.grid(row=1, column=0, sticky="nsew", padx=10, pady=6)
+
+        selected: dict[str, Path | None] = {"path": None}
+
+        def choose_current() -> None:
+            focus = tree.focus() or (tree.selection()[0] if tree.selection() else "")
+            selected["path"] = by_item.get(focus)
+            dialog.destroy()
+
+        def choose_file() -> None:
+            path_text = filedialog.askopenfilename(
+                parent=dialog,
+                filetypes=[("Layout metadata", "*.layout_metadata.json *.json"), ("All files", "*.*")],
+            )
+            selected["path"] = Path(path_text) if path_text else None
+            dialog.destroy()
+
+        def cancel() -> None:
+            selected["path"] = None
+            dialog.destroy()
+
+        tree.bind("<Double-1>", lambda _event: choose_current())
+        buttons = ttk.Frame(dialog)
+        buttons.grid(row=2, column=0, sticky="e", padx=10, pady=(4, 10))
+        ttk.Button(buttons, text="파일에서 선택", command=choose_file).pack(side="left", padx=4)
+        ttk.Button(buttons, text="선택", command=choose_current).pack(side="left", padx=4)
+        ttk.Button(buttons, text="취소", command=cancel).pack(side="left", padx=4)
+        self.wait_window(dialog)
+        return selected["path"]
 
     def _selected_story(self) -> Story | None:
         name = self.selected_story_name.get()
@@ -1281,11 +1796,23 @@ class FloorLoadAutoApp(tk.Tk):
         ]
 
     def run_worker(self, title: str, fn) -> None:
+        if self._busy:
+            messagebox.showinfo("작업 진행 중", "현재 작업이 진행 중입니다. 완료 후 다시 실행해 주세요.")
+            return
+        self._set_busy(True, title)
+        self._start_progress(title)
         self.log(f"[{title}] 시작")
+        reporter = ProgressReporter(callback=lambda percent, message="": self.queue.put(("progress", (percent, message or title))))
 
         def wrapper():
             try:
-                result = fn()
+                reporter.update(3.0, f"{title} 준비 중")
+                try:
+                    accepts_progress = bool(inspect.signature(fn).parameters)
+                except (TypeError, ValueError):
+                    accepts_progress = False
+                result = fn(reporter) if accepts_progress else fn()
+                reporter.update(95.0, f"{title} 마무리 중")
                 self.queue.put(("done", (title, result)))
             except PermissionError as exc:
                 self.logger.exception("%s failed", title)
@@ -1321,11 +1848,24 @@ class FloorLoadAutoApp(tk.Tk):
                     if title == "DXF 템플릿 생성":
                         self._handle_dxf_template_result(result)
                     elif title.startswith("MGT"):
-                        self.result_label.configure(text=f"결과 파일: {result}")
+                        self._handle_mgt_build_result(result)
+                    self._finish_progress("완료")
+                    self._set_busy(False)
                 elif kind == "error":
                     title, message = payload
                     self.log(f"[{title}] 오류: {message}")
+                    if title == "DXF 템플릿 생성":
+                        self._mark_dxf_generated_failed(str(message))
+                    elif title == "MGT 생성/import":
+                        self._mark_model_generated_failed(str(message))
+                    elif title == "MGT 생성":
+                        self._mark_model_not_generated("full MGT 생성에 실패했습니다. 모델링 파일은 생성되지 않았습니다.")
+                    self._error_progress("오류")
+                    self._set_busy(False)
                     messagebox.showerror(title, message)
+                elif kind == "progress":
+                    percent, message = payload
+                    self._set_progress(percent, message)
                 elif kind == "stories":
                     self._refresh_story_tree(payload)
                 elif kind == "regions":
@@ -1387,6 +1927,12 @@ class FloorLoadAutoApp(tk.Tk):
         for region in regions:
             load = region.load
             mode, mode_source = infer_distribution(region.region, load) if load else ("", "")
+            direction_markers = list(getattr(region.region, "direction_markers", []) or [])
+            direction_summary = str(len(direction_markers))
+            if direction_markers:
+                marker_ids = ",".join(str(getattr(marker, "source_id", "") or "") for marker in direction_markers)
+                match_methods = ",".join(str(getattr(marker, "match_method", "") or "") for marker in direction_markers)
+                direction_summary = f"{len(direction_markers)} / {match_methods} / {marker_ids}"
             self.dxf_tree.insert(
                 "",
                 "end",
@@ -1401,7 +1947,7 @@ class FloorLoadAutoApp(tk.Tk):
                     "YES" if region.region.hatch_solid_fill else "NO",
                     mode,
                     mode_source,
-                    len(region.region.direction_markers),
+                    direction_summary,
                     load.real_name if load else "",
                     "" if not load else f"{load.dl:.2f}",
                     "" if not load else f"{load.ll:.2f}",

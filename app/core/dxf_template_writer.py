@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable
+from statistics import median
+from typing import Iterable, Sequence
 import json
 
 import ezdxf
@@ -11,6 +12,10 @@ from .load_parser import make_safe_load_layer_name
 from .mgt_parser import Element, Node, Story
 from .dxf_story_layout import BBox2D, bbox_from_points, plan_story_layouts, write_layout_metadata
 from .load_input_policy import DIRECTION_LAYERS
+
+
+DEFAULT_HATCH_SCALE = 0.01
+HATCH_GUIDE_LAYER = "FLOAD_HATCH_GUIDE"
 
 
 @dataclass(frozen=True)
@@ -35,6 +40,16 @@ class DxfTemplateResult:
     story_count: int = 1
 
 
+def normalize_hatch_scale(value, default: float = DEFAULT_HATCH_SCALE) -> float:
+    try:
+        scale = float(str(value).strip())
+    except Exception:
+        return default
+    if scale <= 0:
+        return default
+    return scale
+
+
 def write_story_centerline_dxf(
     *,
     output_path: str | Path,
@@ -43,11 +58,14 @@ def write_story_centerline_dxf(
     elements: Iterable[Element],
     load_layers: Iterable[LoadLayerSpec] = (),
     story_tolerance: float = 0.01,
+    default_hatch_scale: float = DEFAULT_HATCH_SCALE,
 ) -> DxfTemplateResult:
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
+    hatch_scale = normalize_hatch_scale(default_hatch_scale)
     node_map = {n.node_id: n for n in nodes}
     doc = ezdxf.new("R2010")
+    _set_hatch_header_defaults(doc, default_hatch_scale=hatch_scale)
     doc.header["$INSUNITS"] = 6  # meter, if CAD honors it.
     korean_text_style = _ensure_korean_text_style(doc)
     msp = doc.modelspace()
@@ -56,6 +74,7 @@ def write_story_centerline_dxf(
     element_count = 0
     warnings = 0
     bounds = _empty_bounds()
+    column_points: list[tuple[float, float]] = []
     tol = abs(float(story_tolerance))
     for elem in elements:
         pts = [node_map[nid] for nid in elem.node_ids if nid in node_map]
@@ -68,14 +87,14 @@ def write_story_centerline_dxf(
                 _expand_bounds(bounds, [story_pts[0].xy, story_pts[1].xy])
                 element_count += 1
             elif len(story_pts) == 1:
-                _add_column_marker(msp, story_pts[0].xy)
+                column_points.append(story_pts[0].xy)
                 _expand_bounds(bounds, [story_pts[0].xy])
                 element_count += 1
             continue
         if elem.elem_type in {"COLUMN"}:
             p = _representative_xy(story_pts or pts)
             if p:
-                _add_column_marker(msp, p)
+                column_points.append(p)
                 _expand_bounds(bounds, [p])
                 element_count += 1
             continue
@@ -92,13 +111,18 @@ def write_story_centerline_dxf(
                     _expand_bounds(bounds, xy)
                     element_count += 1
             elif len(story_pts) == 1:
-                _add_column_marker(msp, story_pts[0].xy)
+                column_points.append(story_pts[0].xy)
                 _expand_bounds(bounds, [story_pts[0].xy])
                 element_count += 1
             else:
                 warnings += 1
 
-    _add_guide_text_below_geometry(msp, story, bounds, korean_text_style)
+    point_display_size = _compute_point_display_size_from_bounds(bounds)
+    _set_point_display_defaults(doc, point_size=point_display_size)
+    for point in column_points:
+        _add_column_point_symbol(msp, point)
+
+    _add_guide_text_below_geometry(msp, story, bounds, korean_text_style, default_hatch_scale=hatch_scale)
 
     mapping_rows = []
     for index, layer_spec in enumerate(load_layers, start=1):
@@ -141,6 +165,7 @@ def write_all_story_centerline_dxf(
     elements: Iterable[Element],
     load_layers: Iterable[LoadLayerSpec] = (),
     story_tolerance: float = 0.01,
+    default_hatch_scale: float = DEFAULT_HATCH_SCALE,
 ) -> DxfTemplateResult:
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -148,9 +173,11 @@ def write_all_story_centerline_dxf(
     node_list = list(nodes)
     element_list = list(elements)
     load_layer_list = list(load_layers)
+    hatch_scale = normalize_hatch_scale(default_hatch_scale)
     node_map = {n.node_id: n for n in node_list}
 
     doc = ezdxf.new("R2010")
+    _set_hatch_header_defaults(doc, default_hatch_scale=hatch_scale)
     doc.header["$INSUNITS"] = 6
     korean_text_style = _ensure_korean_text_style(doc)
     msp = doc.modelspace()
@@ -171,6 +198,8 @@ def write_all_story_centerline_dxf(
         total_warnings += warnings
 
     layouts = plan_story_layouts(story_list, source_bboxes)
+    point_display_size = _compute_common_point_display_size(source_bboxes)
+    _set_point_display_defaults(doc, point_size=point_display_size)
     for (story, primitives, _bbox), layout in zip(story_drawings, layouts):
         _draw_story_primitives(msp, primitives, layout.transform.apply)
         msp.add_text(
@@ -178,6 +207,13 @@ def write_all_story_centerline_dxf(
             dxfattribs={"layer": "STORY_LABEL", "height": layout.text_height, "style": korean_text_style},
         ).set_placement((layout.label_x, layout.label_y))
 
+    _add_guide_text_below_geometry(
+        msp,
+        Story("ALL_STORIES", 0.0),
+        _bounds_from_layouts(layouts),
+        korean_text_style,
+        default_hatch_scale=hatch_scale,
+    )
     _write_load_layers(doc, load_layer_list)
 
     try:
@@ -207,9 +243,76 @@ def _ensure_template_layers(doc) -> None:
     _ensure_layer(doc, "REFERENCE_GRID", color=8)
     _ensure_layer(doc, "LOAD_DL_0.0_LL_0.0", color=1)
     _ensure_layer(doc, "FLOAD_GUIDE", color=6)
+    _ensure_layer(doc, HATCH_GUIDE_LAYER, color=2)
     for layer in DIRECTION_LAYERS:
         _ensure_layer(doc, layer, color=1)
     _ensure_layer(doc, "FLOAD_DIRECTION_GUIDE", color=3)
+
+
+def _set_hatch_header_defaults(doc, *, default_hatch_scale: float = DEFAULT_HATCH_SCALE) -> None:
+    scale = normalize_hatch_scale(default_hatch_scale)
+    for name, value in (
+        ("$HPSCALE", scale),
+        ("$HPANG", 0.0),
+        ("$HPNAME", "ANSI31"),
+    ):
+        try:
+            doc.header[name] = value
+        except Exception:
+            pass
+
+
+def _set_point_display_defaults(doc, *, point_size: float) -> None:
+    for name, value in (
+        ("$PDMODE", 34),
+        ("$PDSIZE", float(point_size)),
+    ):
+        try:
+            doc.header[name] = value
+        except Exception:
+            pass
+
+
+def _bounds_from_layouts(layouts) -> list[float | None]:
+    bounds = _empty_bounds()
+    for layout in layouts:
+        bbox = layout.placed_bbox
+        _expand_bounds(bounds, [(bbox.min_x, bbox.min_y), (bbox.max_x, bbox.max_y)])
+    return bounds
+
+
+def _bounds_to_bbox(bounds: Sequence[float | None]) -> BBox2D:
+    min_x, min_y, max_x, max_y = bounds
+    if min_x is None or min_y is None or max_x is None or max_y is None:
+        return BBox2D(-0.5, -0.5, 0.5, 0.5)
+    return BBox2D(float(min_x), float(min_y), float(max_x), float(max_y))
+
+
+def _bbox_reference_dimension(bbox: BBox2D) -> float:
+    width = max(float(bbox.width), 0.0)
+    height = max(float(bbox.height), 0.0)
+    if width > 0.0 and height > 0.0:
+        return min(width, height)
+    return max(width, height, 1.0)
+
+
+def _compute_point_display_size(bbox: BBox2D) -> float:
+    ref = _bbox_reference_dimension(bbox)
+    return _clamp(ref * 0.012, ref * 0.004, ref * 0.025)
+
+
+def _compute_point_display_size_from_bounds(bounds: Sequence[float | None]) -> float:
+    return _compute_point_display_size(_bounds_to_bbox(bounds))
+
+
+def _compute_common_point_display_size(bboxes: Sequence[BBox2D]) -> float:
+    if not bboxes:
+        return _compute_point_display_size(BBox2D(-0.5, -0.5, 0.5, 0.5))
+    return float(median(_compute_point_display_size(bbox) for bbox in bboxes))
+
+
+def _clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(float(minimum), min(float(value), float(maximum)))
 
 
 def _load_layer_mapping_rows(load_layers: list[LoadLayerSpec]) -> list[dict]:
@@ -291,8 +394,8 @@ def _draw_story_primitives(msp, primitives: list[tuple], transform) -> None:
             _kind, layer, points, close = primitive
             msp.add_lwpolyline([transform(*p) for p in points], close=close, dxfattribs={"layer": layer})
         elif kind == "column":
-            _kind, _layer, point = primitive
-            _add_column_marker(msp, transform(*point))
+            _kind, layer, point = primitive
+            _add_column_point_symbol(msp, transform(*point), layer=layer)
 
 
 def _ensure_korean_text_style(doc) -> str:
@@ -326,7 +429,15 @@ def _expand_bounds(bounds: list[float | None], points: Iterable[tuple[float, flo
             bounds[3] = fy
 
 
-def _add_guide_text_below_geometry(msp, story: Story, bounds: list[float | None], korean_text_style: str) -> None:
+def _add_guide_text_below_geometry(
+    msp,
+    story: Story,
+    bounds: list[float | None],
+    korean_text_style: str,
+    *,
+    default_hatch_scale: float = DEFAULT_HATCH_SCALE,
+) -> None:
+    hatch_scale = normalize_hatch_scale(default_hatch_scale)
     min_x, min_y, max_x, max_y = bounds
     if min_x is None or min_y is None or max_x is None or max_y is None:
         base_x = 0.0
@@ -347,25 +458,46 @@ def _add_guide_text_below_geometry(msp, story: Story, bounds: list[float | None]
         f"MIDAS Floor Load Template / Story={story.name} / Elev={story.elevation:g}",
         dxfattribs={"layer": "FLOAD_GUIDE", "height": title_height, "style": korean_text_style},
     ).set_placement((base_x, base_y))
-    msp.add_text(
-        "하중영역은 LOAD_* 레이어에 HATCH로 작성하세요. HATCH 실패 시 폐합 LWPOLYLINE을 fallback으로 읽습니다.",
-        dxfattribs={"layer": "FLOAD_GUIDE", "height": note_height, "style": korean_text_style},
-    ).set_placement((base_x, base_y - max(title_height * 1.5, note_height * 2.0, 0.5)))
     line_gap = max(title_height * 1.5, note_height * 2.0, 0.5)
-    msp.add_text(
-        "TWO WAY: use SOLID HATCH or LOAD_*_TW. ONE WAY: use non-SOLID HATCH or LOAD_*_OW.",
-        dxfattribs={"layer": "FLOAD_GUIDE", "height": note_height, "style": korean_text_style},
-    ).set_placement((base_x, base_y - line_gap * 2.0))
-    msp.add_text(
-        "ONE WAY main direction is the short-span direction. Draw a short override line inside the hatch on ONE WAY SLAB DIRECTION only when needed.",
-        dxfattribs={"layer": "FLOAD_GUIDE", "height": note_height, "style": korean_text_style},
-    ).set_placement((base_x, base_y - line_gap * 3.0))
+    notes = [
+        "하중영역은 LOAD_* 레이어에 HATCH로 작성하세요. HATCH 실패 시 폐합 LWPOLYLINE을 fallback으로 읽습니다.",
+        f"권장 HATCH 축척: {_fmt_float(hatch_scale)}",
+        f"CAD에서 HATCH 패턴이 너무 크게 보이면 HATCH SCALE을 {_fmt_float(hatch_scale)}로 설정하세요.",
+        "SOLID HATCH = TWO WAY. SOLID가 아닌 HATCH = ONE WAY.",
+        "ONE WAY 방향선은 ONE WAY SLAB DIRECTION 레이어에 시작점-끝점 방향으로 작성하세요.",
+        "방향선은 여러 HATCH를 연속 통과하는 긴 선으로 그릴 수 있으며, 통과한 각 HATCH에 적용됩니다.",
+        "HATCH와 교차하지 않는 외부 평행 방향선은 기본적으로 무시됩니다.",
+        "기둥 위치는 CENTERLINE_COLUMN 레이어의 POINT로 표시하며, HATCH island가 생기지 않도록 박스/원 객체를 쓰지 않습니다.",
+        "CAD에서 점이 작게 보이면 PDMODE/PDSIZE 설정을 확인하세요.",
+    ]
+    for index, text in enumerate(notes, start=1):
+        msp.add_text(
+            text,
+            dxfattribs={"layer": "FLOAD_GUIDE", "height": note_height, "style": korean_text_style},
+        ).set_placement((base_x, base_y - line_gap * index))
+    _add_hatch_scale_guide(msp, base_x, base_y - line_gap * (len(notes) + 1.3), note_height, hatch_scale)
 
 
-def _add_column_marker(msp, xy: tuple[float, float], size: float = 0.25) -> None:
+def _add_hatch_scale_guide(msp, base_x: float, base_y: float, note_height: float, hatch_scale: float) -> None:
+    width = max(note_height * 18.0, 2.0)
+    height = max(note_height * 8.0, 1.0)
+    points = [
+        (base_x, base_y),
+        (base_x + width, base_y),
+        (base_x + width, base_y - height),
+        (base_x, base_y - height),
+    ]
+    try:
+        hatch = msp.add_hatch(dxfattribs={"layer": HATCH_GUIDE_LAYER})
+        hatch.set_pattern_fill("ANSI31", scale=normalize_hatch_scale(hatch_scale))
+        hatch.paths.add_polyline_path(points, is_closed=True)
+    except Exception:
+        return
+
+
+def _add_column_point_symbol(msp, xy: tuple[float, float], *, layer: str = "CENTERLINE_COLUMN") -> None:
     x, y = xy
-    msp.add_line((x - size, y), (x + size, y), dxfattribs={"layer": "CENTERLINE_COLUMN"})
-    msp.add_line((x, y - size), (x, y + size), dxfattribs={"layer": "CENTERLINE_COLUMN"})
+    msp.add_point((float(x), float(y)), dxfattribs={"layer": layer})
 
 
 def _unique_xy(points: list[tuple[float, float]], ndigits: int = 8) -> list[tuple[float, float]]:
@@ -384,6 +516,11 @@ def _representative_xy(nodes: list[Node]) -> tuple[float, float] | None:
     if not nodes:
         return None
     return (sum(p.x for p in nodes) / len(nodes), sum(p.y for p in nodes) / len(nodes))
+
+
+def _fmt_float(value: float) -> str:
+    text = f"{float(value):.6f}".rstrip("0").rstrip(".")
+    return "0" if text in {"", "-0"} else text
 
 
 def _mapping_csv(rows: list[dict]) -> str:

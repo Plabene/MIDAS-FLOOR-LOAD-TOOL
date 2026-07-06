@@ -18,6 +18,7 @@ class AppConfig:
     timeout_seconds: int = 60
     verify_ssl: bool = True
     story_tolerance: float = 0.01
+    default_hatch_scale: float = 0.01
     snap_tolerance: float = 0.5
     area_error_limit: float = 0.25
     include_zero_load: bool = False

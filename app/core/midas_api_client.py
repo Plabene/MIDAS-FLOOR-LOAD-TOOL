@@ -8,6 +8,8 @@ import time
 
 import requests
 
+from ..utils.path_utils import unique_numbered_path
+
 
 class MidasApiError(RuntimeError):
     def __init__(self, message: str, *, detail: str = ""):
@@ -152,10 +154,12 @@ class MidasGenApiClient:
     def save_project(self) -> Any:
         return self.post(self.SAVE_ENDPOINT, {"Argument": {}})
 
-    def save_as_project(self, target_path: str | Path) -> Path:
+    def save_as_project(self, target_path: str | Path, *, avoid_overwrite: bool = False) -> Path:
         path = Path(target_path).expanduser().resolve()
         if path.suffix.lower() != ".mgbx":
             path = path.with_suffix(".mgbx")
+        if avoid_overwrite:
+            path = unique_numbered_path(path, start=2)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.post(self.SAVEAS_ENDPOINT, {"Argument": str(path)})
         return path

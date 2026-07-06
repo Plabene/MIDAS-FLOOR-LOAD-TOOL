@@ -57,6 +57,29 @@ def test_multiple_direction_markers_inside_polygon_is_ambiguous(tmp_path: Path):
     assert assignments[0].status == "AMBIGUOUS_ONEWAY_DIRECTION"
 
 
+def test_same_axis_multiple_direction_markers_are_merged(tmp_path: Path):
+    dxf = tmp_path / "same_axis_markers.dxf"
+    doc = ezdxf.new("R2010")
+    load_layer = "LOAD_001_Office_DL_1.2_LL_3.4"
+    doc.layers.add(load_layer)
+    doc.layers.add("ONE WAY SLAB DIRECTION")
+    hatch = doc.modelspace().add_hatch(dxfattribs={"layer": load_layer})
+    hatch.set_pattern_fill("ANSI31", scale=1.0)
+    hatch.paths.add_polyline_path([(0, 0), (10, 0), (10, 3), (0, 3)], is_closed=True)
+    doc.modelspace().add_line((1.0, 1.0), (4.0, 1.0), dxfattribs={"layer": "ONE WAY SLAB DIRECTION"})
+    doc.modelspace().add_line((6.0, 2.0), (8.0, 2.1), dxfattribs={"layer": "ONE WAY SLAB DIRECTION"})
+    doc.saveas(dxf)
+
+    region = read_load_regions(dxf)[0]
+    assignments = build_assignments_from_regions(regions=[region], story_nodes=_nodes(), snap_tolerance=0.01, include_zero_load=True)
+
+    assert len(region.region.direction_markers) == 2
+    assert assignments[0].status == "OK"
+    assert assignments[0].direction_source == "DXF_DIRECTION_MARKER"
+    assert assignments[0].direction_marker_source_id.count(",") == 1
+    assert assignments[0].one_way_angle_deg == pytest.approx(0.0)
+
+
 def test_one_way_default_direction_is_short_span_main_direction():
     points = [(0, 0), (10, 0), (10, 3), (0, 3)]
 
