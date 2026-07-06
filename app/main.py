@@ -17,7 +17,7 @@ try:
     # package 실행: python -m app.main
     from .core.dxf_load_reader import read_load_regions
     from .core.diagnostic_dxf_writer import write_floorload_diagnostic_dxf
-    from .core.dxf_template_writer import LoadLayerSpec, normalize_hatch_scale, write_all_story_centerline_dxf, write_story_centerline_dxf
+    from .core.dxf_template_writer import LoadLayerSpec, write_all_story_centerline_dxf, write_story_centerline_dxf
     from .core.dxf_story_layout import LayoutMetadataSelection, select_layout_metadata
     from .core.floorload_mgt_builder import run_mgt_build_pipeline
     from .core.load_selection import apply_load_display_names
@@ -30,9 +30,12 @@ try:
     from .core.mgt_parser import (
         FloorLoadTypeSpec,
         Story,
+        dxf_unit_scale_from_model_length_unit,
         parse_floorload_type_names_from_text,
         parse_floadtype_specs_from_text,
         parse_mgt_file,
+        parse_unit_from_text,
+        read_text,
         select_nodes_by_story,
     )
     from .core.midas_api_client import MidasApiError, MidasGenApiClient
@@ -57,7 +60,7 @@ except ImportError:  # 직접 실행: python app/main.py
         sys.path.insert(0, str(ROOT))
     from app.core.dxf_load_reader import read_load_regions
     from app.core.diagnostic_dxf_writer import write_floorload_diagnostic_dxf
-    from app.core.dxf_template_writer import LoadLayerSpec, normalize_hatch_scale, write_all_story_centerline_dxf, write_story_centerline_dxf
+    from app.core.dxf_template_writer import LoadLayerSpec, write_all_story_centerline_dxf, write_story_centerline_dxf
     from app.core.dxf_story_layout import LayoutMetadataSelection, select_layout_metadata
     from app.core.floorload_mgt_builder import run_mgt_build_pipeline
     from app.core.load_selection import apply_load_display_names
@@ -70,9 +73,12 @@ except ImportError:  # 직접 실행: python app/main.py
     from app.core.mgt_parser import (
         FloorLoadTypeSpec,
         Story,
+        dxf_unit_scale_from_model_length_unit,
         parse_floorload_type_names_from_text,
         parse_floadtype_specs_from_text,
         parse_mgt_file,
+        parse_unit_from_text,
+        read_text,
         select_nodes_by_story,
     )
     from app.core.midas_api_client import MidasApiError, MidasGenApiClient
@@ -153,6 +159,11 @@ def _format_region_bbox_for_ui(values) -> str:
     return ",".join(f"{float(value):.3f}".rstrip("0").rstrip(".") for value in values)
 
 
+def _format_scale_for_ui(value: float) -> str:
+    text = f"{float(value):.6f}".rstrip("0").rstrip(".")
+    return "0" if text in {"", "-0"} else text
+
+
 class FloorLoadAutoApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -182,6 +193,7 @@ class FloorLoadAutoApp(tk.Tk):
         self.stories: list[Story] = []
         self.nodes = []
         self.elements = []
+        self.current_mgt_text = ""
         self.loaded_regions = []
         self.diagnostic_issues = []
         self.last_diagnostic_dxf_path: Path | None = None
@@ -202,6 +214,11 @@ class FloorLoadAutoApp(tk.Tk):
         self.dxf_next_action_text_var = tk.StringVar(value="DXF 생성 전에는 열 수 있는 파일이 없습니다.")
         self.model_next_action_text_var = tk.StringVar(value="모델링 파일 생성 전에는 열 수 있는 파일이 없습니다.")
         self.floorload_status_var = tk.StringVar(value="모델/MGT를 먼저 읽어 FLOOR LOAD 존재 여부를 분석하세요.")
+        self.diagnostic_summary_var = tk.StringVar(value="FLOORLOAD 진단 전입니다.")
+        self.model_unit_info = None
+        self.model_length_unit_var = tk.StringVar(value="")
+        self.dxf_unit_scale_var = tk.DoubleVar(value=1.0)
+        self.dxf_unit_status_var = tk.StringVar(value="DXF output unit: mm. Load an MGT file to detect model length unit.")
         self.pdf_mgtx_path = tk.StringVar()
         self.pdf_merge_output_path = tk.StringVar()
         self.progress_var = tk.DoubleVar(value=0.0)
@@ -376,6 +393,7 @@ class FloorLoadAutoApp(tk.Tk):
         self.open_diag_report_button = ttk.Button(diag_button_frame, text="진단 보고서 열기", command=self.open_last_diagnostic_report)
         self.open_diag_report_button.pack(side="left", padx=4)
         self.open_diag_report_button.state(["disabled"])
+        ttk.Label(f, textvariable=self.diagnostic_summary_var, foreground="blue", wraplength=980).grid(row=10, column=0, columnspan=3, sticky="w", padx=8, pady=(4, 0))
         self.diagnostic_tree = ttk.Treeview(
             f,
             columns=("story", "severity", "type", "xy", "nodes", "elements", "message", "action"),
@@ -394,8 +412,8 @@ class FloorLoadAutoApp(tk.Tk):
         ):
             self.diagnostic_tree.heading(col, text=txt)
             self.diagnostic_tree.column(col, width=width)
-        self.diagnostic_tree.grid(row=10, column=0, columnspan=3, sticky="nsew", padx=8, pady=8)
-        f.rowconfigure(10, weight=1)
+        self.diagnostic_tree.grid(row=11, column=0, columnspan=3, sticky="nsew", padx=8, pady=8)
+        f.rowconfigure(11, weight=1)
 
     def _build_pdf_tab(self) -> None:
         f = self.tab_pdf
@@ -455,11 +473,12 @@ class FloorLoadAutoApp(tk.Tk):
         ttk.Label(f, text="Story tolerance").grid(row=0, column=0, sticky="w", padx=8, pady=8)
         self.story_tol_var = tk.DoubleVar(value=self.config_data.story_tolerance)
         ttk.Entry(f, textvariable=self.story_tol_var, width=12).grid(row=0, column=1, sticky="w", padx=8, pady=8)
-        hatch_scale_frame = ttk.Frame(f)
-        hatch_scale_frame.grid(row=0, column=2, sticky="e", padx=8, pady=8)
-        ttk.Label(hatch_scale_frame, text="CAD 기본 HATCH 축척").pack(side="left", padx=(0, 4))
-        self.default_hatch_scale_var = tk.StringVar(value=str(self.config_data.default_hatch_scale))
-        ttk.Entry(hatch_scale_frame, textvariable=self.default_hatch_scale_var, width=10).pack(side="left")
+        ttk.Label(
+            f,
+            textvariable=self.dxf_unit_status_var,
+            foreground="blue",
+            wraplength=360,
+        ).grid(row=0, column=2, sticky="e", padx=8, pady=8)
 
         ttk.Label(
             f,
@@ -896,11 +915,20 @@ class FloorLoadAutoApp(tk.Tk):
             timeout_seconds=int(self.timeout_var.get()),
             verify_ssl=bool(self.verify_ssl_var.get()),
             story_tolerance=float(self.story_tol_var.get() if hasattr(self, "story_tol_var") else self.config_data.story_tolerance),
-            default_hatch_scale=normalize_hatch_scale(
-                self.default_hatch_scale_var.get() if hasattr(self, "default_hatch_scale_var") else self.config_data.default_hatch_scale
-            ),
+            default_hatch_scale=1.0,
             snap_tolerance=float(self.snap_tol_var.get() if hasattr(self, "snap_tol_var") else self.config_data.snap_tolerance),
             include_zero_load=bool(self.include_zero_var.get() if hasattr(self, "include_zero_var") else self.config_data.include_zero_load),
+        )
+
+    def _update_model_unit_state(self, mgt_text: str) -> None:
+        unit_info = parse_unit_from_text(mgt_text)
+        model_length_unit = unit_info.length or "UNKNOWN"
+        scale = dxf_unit_scale_from_model_length_unit(unit_info.length)
+        self.model_unit_info = unit_info
+        self.model_length_unit_var.set(model_length_unit)
+        self.dxf_unit_scale_var.set(scale)
+        self.dxf_unit_status_var.set(
+            f"Model unit {model_length_unit} -> DXF mm scale {_format_scale_for_ui(scale)}. Metadata converts back on import."
         )
 
     def save_current_config(self) -> None:
@@ -961,6 +989,8 @@ class FloorLoadAutoApp(tk.Tk):
         def job(progress):
             progress.update(15.0, "MGT 파일 읽는 중")
             _stories, _nodes, _elements, text = parse_mgt_file(path)
+            self.current_mgt_text = text
+            self._update_model_unit_state(text)
             progress.update(55.0, "FLOOR LOAD 존재 여부 분석 중")
             presence = detect_floor_load_presence_from_text(text)
             progress.update(80.0, "하중 목록 갱신 중")
@@ -1040,6 +1070,8 @@ class FloorLoadAutoApp(tk.Tk):
             progress.update(60.0, "병합 MGT 다시 읽는 중")
             self.exported_mgt_path.set(str(result.output_mgt_path))
             _stories, _nodes, _elements, text = parse_mgt_file(result.output_mgt_path)
+            self.current_mgt_text = text
+            self._update_model_unit_state(text)
             progress.update(80.0, "병합 결과 분석 중")
             presence = detect_floor_load_presence_from_text(text)
             self.queue.put(("floorload_status", presence))
@@ -1126,6 +1158,8 @@ class FloorLoadAutoApp(tk.Tk):
         if progress:
             progress.update(35.0, "MGT 파일 읽는 중")
         stories, nodes, elements, mgt_text = parse_mgt_file(path)
+        self.current_mgt_text = mgt_text
+        self._update_model_unit_state(mgt_text)
         if not stories:
             raise RuntimeError("Story 정보가 없습니다. MGT의 *STORY 블록 또는 API STOR 데이터를 확인해 주세요.")
         if progress:
@@ -1165,9 +1199,8 @@ class FloorLoadAutoApp(tk.Tk):
             )
             return
         self._reset_dxf_next_action_state()
-        default_hatch_scale = normalize_hatch_scale(
-            self.default_hatch_scale_var.get() if hasattr(self, "default_hatch_scale_var") else self.config_data.default_hatch_scale
-        )
+        model_length_unit = self.model_length_unit_var.get()
+        dxf_unit_scale = float(self.dxf_unit_scale_var.get() or 1.0)
 
         def job(progress):
             progress.update(10.0, "DXF 생성 작업 폴더 준비 중")
@@ -1199,7 +1232,8 @@ class FloorLoadAutoApp(tk.Tk):
                     elements=self.elements,
                     load_layers=specs,
                     story_tolerance=float(self.story_tol_var.get()),
-                    default_hatch_scale=default_hatch_scale,
+                    model_length_unit=model_length_unit,
+                    dxf_unit_scale_from_model=dxf_unit_scale,
                 )
             else:
                 progress.update(35.0, "Story center line DXF geometry 생성 중")
@@ -1210,7 +1244,8 @@ class FloorLoadAutoApp(tk.Tk):
                     elements=self.elements,
                     load_layers=specs,
                     story_tolerance=float(self.story_tol_var.get()),
-                    default_hatch_scale=default_hatch_scale,
+                    model_length_unit=model_length_unit,
+                    dxf_unit_scale_from_model=dxf_unit_scale,
                 )
             progress.update(90.0, "DXF 템플릿 결과 정리 중")
             return result
@@ -1254,21 +1289,29 @@ class FloorLoadAutoApp(tk.Tk):
             self._ensure_current_project_workspace()
             reports_dir = self.current_project_subdirs["reports"]
             progress.update(30.0, "FLOORLOAD 모델링 진단 중")
-            issues = analyze_floorload_model(
+            mgt_text = self.current_mgt_text
+            if not mgt_text and self.exported_mgt_path.get().strip():
+                try:
+                    mgt_text = read_text(self.exported_mgt_path.get().strip())
+                except Exception:
+                    mgt_text = ""
+            result = analyze_floorload_model(
                 nodes=self.nodes,
                 elements=self.elements,
                 stories=self.stories,
+                mgt_text=mgt_text,
                 planned_load_regions=self.loaded_regions,
                 story_tolerance=float(self.story_tol_var.get()),
                 snap_tolerance=float(self.snap_tol_var.get() if hasattr(self, "snap_tol_var") else self.config_data.snap_tolerance),
             )
+            issues = result.issues
             progress.update(70.0, "진단 보고서 저장 중")
-            json_path, csv_path = write_diagnostic_reports(issues, reports_dir)
+            json_path, csv_path = write_diagnostic_reports(result, reports_dir)
             progress.update(85.0, "진단 DXF 생성 중")
             dxf_path = write_floorload_diagnostic_dxf(output_path=reports_dir / "floorload_diagnostics_all.dxf", issues=issues)
             self.last_diagnostic_dxf_path = dxf_path
             self.last_diagnostic_report_path = csv_path
-            self.queue.put(("diagnostics", issues))
+            self.queue.put(("diagnostics", result))
             progress.update(92.0, "진단 결과 UI 반영 중")
             return f"FLOORLOAD 모델링 진단 완료: {len(issues)}개 이슈\nDXF: {dxf_path}\nCSV: {csv_path}\nJSON: {json_path}"
 
@@ -1960,7 +2003,18 @@ class FloorLoadAutoApp(tk.Tk):
             )
 
     def _refresh_diagnostic_tree(self, issues) -> None:
-        self.diagnostic_issues = list(issues or [])
+        summary = getattr(issues, "summary", None)
+        raw_issues = list(getattr(issues, "issues", issues or []))
+        self.diagnostic_issues = raw_issues
+        if summary is not None and hasattr(self, "diagnostic_summary_var"):
+            element_types = ", ".join(f"{name}={count}" for name, count in sorted(summary.element_type_counts.items()))
+            self.diagnostic_summary_var.set(
+                f"판정: {summary.status} | Unit: {summary.unit_force or '?'}-{summary.unit_length or '?'} | "
+                f"Stories: {summary.story_count}, Nodes: {summary.node_count}, Elements: {summary.element_count} "
+                f"({element_types or 'no elements'}) | FLOADTYPE: {summary.floadtype_count}, "
+                f"Existing FLOORLOAD: {summary.existing_floorload_count}, Target regions: {summary.planned_region_count} | "
+                f"ERROR {summary.error_count}, WARNING {summary.warning_count}, INFO {summary.info_count}"
+            )
         if hasattr(self, "open_diag_dxf_button") and self.last_diagnostic_dxf_path:
             self.open_diag_dxf_button.state(["!disabled"])
         if hasattr(self, "open_diag_report_button") and self.last_diagnostic_report_path:
@@ -1969,7 +2023,10 @@ class FloorLoadAutoApp(tk.Tk):
             return
         for item in self.diagnostic_tree.get_children():
             self.diagnostic_tree.delete(item)
-        for issue in self.diagnostic_issues:
+        visible_issues = [issue for issue in self.diagnostic_issues if str(issue.severity).upper() in {"ERROR", "WARNING"}]
+        if not visible_issues:
+            visible_issues = self.diagnostic_issues[:20]
+        for issue in visible_issues:
             self.diagnostic_tree.insert(
                 "",
                 "end",

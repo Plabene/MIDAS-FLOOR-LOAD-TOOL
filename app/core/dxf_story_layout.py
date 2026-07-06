@@ -12,6 +12,8 @@ import ezdxf
 from shapely.affinity import affine_transform
 from shapely.geometry import Polygon
 
+from .load_parser import normalize_cad_layer_name
+
 _HATCH_BBOX_EXCLUDED_LAYERS = {
     "CENTERLINE_COLUMN",
     "CENTERLINE_BEAM",
@@ -60,6 +62,16 @@ class BBox2D:
         if max_x <= min_x or max_y <= min_y:
             return 0.0
         return (max_x - min_x) * (max_y - min_y)
+
+
+def normalize_dxf_unit_scale(value) -> float:
+    try:
+        scale = float(value)
+    except Exception:
+        return 1.0
+    if scale <= 0.0:
+        return 1.0
+    return scale
 
 
 @dataclass(frozen=True)
@@ -177,30 +189,30 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
     return max(float(minimum), min(float(value), float(maximum)))
 
 
-def plan_story_layouts(stories: Sequence[object], source_bboxes: Sequence[BBox2D]) -> list[StoryLayout]:
+def plan_story_layouts(
+    stories: Sequence[object],
+    source_bboxes: Sequence[BBox2D],
+    *,
+    dxf_unit_scale_from_model: float = 1.0,
+) -> list[StoryLayout]:
     if len(stories) != len(source_bboxes):
         raise ValueError("stories and source_bboxes must have the same length.")
     if not stories:
         return []
 
-    heights = [bbox.height for bbox in source_bboxes if bbox.height > 1.0e-9]
-    representative_height = median(heights) if heights else 1.0
-    refs = [_bbox_reference_dimension(bbox) for bbox in source_bboxes]
-    representative_ref = median(refs) if refs else 1.0
-    text_height = _compute_story_label_text_height_from_ref(representative_ref)
-    point_display_size = _compute_point_display_size_from_ref(representative_ref)
-
+    scale = normalize_dxf_unit_scale(dxf_unit_scale_from_model)
     layouts: list[StoryLayout] = []
     cursor_y = 0.0
     for index, (story, bbox) in enumerate(zip(stories, source_bboxes)):
-        height = max(bbox.height, representative_height)
-        gap = max(height * 0.20, text_height * 2.0, representative_height * 0.10)
-        offset_x = -bbox.min_x
-        offset_y = cursor_y - bbox.max_y
-        transform = Affine2D(e=offset_x, f=offset_y)
+        scaled_bbox = BBox2D(bbox.min_x * scale, bbox.min_y * scale, bbox.max_x * scale, bbox.max_y * scale)
+        offset_x = -scaled_bbox.min_x
+        offset_y = cursor_y - scaled_bbox.max_y
+        transform = Affine2D(a=scale, d=scale, e=offset_x, f=offset_y)
         inverse = transform.inverse()
-        placed = bbox.translated(offset_x, offset_y)
-        label_margin = max(text_height * 2.5, point_display_size * 2.0)
+        placed = transform_bbox(bbox, transform)
+        text_height = _compute_story_label_text_height(placed)
+        story_short = max(min(placed.width, placed.height), 1.0)
+        label_margin = max(text_height * 2.5, story_short * 0.03)
         story_name = str(getattr(story, "name", f"Story{index + 1}"))
         elevation = getattr(story, "elevation", None)
         layouts.append(
@@ -212,7 +224,7 @@ def plan_story_layouts(stories: Sequence[object], source_bboxes: Sequence[BBox2D
                 placed_bbox=placed,
                 offset_x=offset_x,
                 offset_y=offset_y,
-                scale=1.0,
+                scale=scale,
                 rotation_deg=0.0,
                 insertion_x=0.0,
                 insertion_y=0.0,
@@ -223,8 +235,19 @@ def plan_story_layouts(stories: Sequence[object], source_bboxes: Sequence[BBox2D
                 text_height=text_height,
             )
         )
+        gap = max(placed.height * 0.25, text_height * 4.0, story_short * 0.10)
         cursor_y = placed.min_y - gap
     return layouts
+
+
+def transform_bbox(bbox: BBox2D, transform: Affine2D) -> BBox2D:
+    points = [
+        transform.apply(bbox.min_x, bbox.min_y),
+        transform.apply(bbox.max_x, bbox.min_y),
+        transform.apply(bbox.max_x, bbox.max_y),
+        transform.apply(bbox.min_x, bbox.max_y),
+    ]
+    return bbox_from_points(points)
 
 
 def transform_polygon(polygon: Polygon, transform: Affine2D) -> Polygon:
@@ -515,24 +538,55 @@ def score_layout_metadata_candidate(
     return score, details
 
 
-def metadata_from_layouts(layouts: Sequence[StoryLayout]) -> dict:
+def metadata_from_layouts(
+    layouts: Sequence[StoryLayout],
+    *,
+    mode: str = "ALL_STORIES",
+    model_length_unit: str = "",
+    dxf_unit_scale_from_model: float = 1.0,
+) -> dict:
+    scale = normalize_dxf_unit_scale(dxf_unit_scale_from_model)
     return {
-        "version": 1,
-        "mode": "ALL_STORIES",
+        "version": 2,
+        "mode": str(mode or "ALL_STORIES"),
         "coordinate_system": "model_xy_to_dxf_xy",
+        "model_length_unit": str(model_length_unit or ""),
+        "dxf_display_unit": "MM",
+        "dxf_unit_scale_from_model": scale,
+        "model_unit_scale_from_dxf": 1.0 / scale,
         "stories": [_layout_to_dict(layout) for layout in layouts],
     }
 
 
 def layouts_from_metadata(data: dict) -> list[StoryLayout]:
-    if not isinstance(data, dict) or data.get("mode") != "ALL_STORIES":
+    if not isinstance(data, dict) or data.get("mode") not in {"ALL_STORIES", "SINGLE_STORY"}:
         return []
     return [_layout_from_dict(row) for row in data.get("stories", []) if isinstance(row, dict)]
 
 
-def write_layout_metadata(path: str | Path, layouts: Sequence[StoryLayout]) -> Path:
+def write_layout_metadata(
+    path: str | Path,
+    layouts: Sequence[StoryLayout],
+    *,
+    mode: str = "ALL_STORIES",
+    model_length_unit: str = "",
+    dxf_unit_scale_from_model: float = 1.0,
+) -> Path:
     out = Path(path)
-    out.write_text(json.dumps(metadata_from_layouts(layouts), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    out.write_text(
+        json.dumps(
+            metadata_from_layouts(
+                layouts,
+                mode=mode,
+                model_length_unit=model_length_unit,
+                dxf_unit_scale_from_model=dxf_unit_scale_from_model,
+            ),
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     return out
 
 
@@ -683,7 +737,7 @@ def _extract_hatch_bboxes(dxf_path: Path) -> list[tuple[float, float, float, flo
         return []
     bboxes: list[tuple[float, float, float, float]] = []
     for entity in doc.modelspace():
-        layer = str(getattr(entity.dxf, "layer", "") or "").upper()
+        layer = normalize_cad_layer_name(str(getattr(entity.dxf, "layer", "") or ""))
         if layer in _HATCH_BBOX_EXCLUDED_LAYERS:
             continue
         if entity.dxftype() == "HATCH":

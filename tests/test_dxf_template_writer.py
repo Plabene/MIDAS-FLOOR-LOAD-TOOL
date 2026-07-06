@@ -39,4 +39,8 @@ def test_write_story_guide_text_below_geometry_with_malgun_style(tmp_path: Path)
     assert doc.styles.get("MALGUN_GOTHIC").dxf.font == "malgun.ttf"
     assert {text.dxf.style for text in guide_texts} == {"MALGUN_GOTHIC"}
     assert all(text.dxf.insert.y < 20.0 for text in guide_texts)
-    assert any("0.01" in text.dxf.text for text in guide_texts)
+    guide = "\n".join(text.dxf.text for text in guide_texts)
+    assert "0.01" not in guide
+    assert "millimeters" in guide
+    assert "● LOAD" in guide
+    assert "◆ ONE WAY SLAB DIRECTION" in guide

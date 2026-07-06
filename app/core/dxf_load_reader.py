@@ -15,7 +15,8 @@ from .dxf_story_layout import (
     read_layout_metadata,
     transform_polygon,
 )
-from .load_input_policy import DIRECTION_LAYERS
+from .load_input_policy import DIRECTION_LAYERS, is_direction_layer
+from .load_parser import normalize_cad_layer_name, strip_cad_work_layer_prefix
 
 Point2D = tuple[float, float]
 
@@ -27,7 +28,7 @@ _TEMPLATE_REFERENCE_LAYERS = {
     "FLOAD_GUIDE",
     "FLOAD_HATCH_GUIDE",
     "STORY_LABEL",
-    *DIRECTION_LAYERS,
+    *{normalize_cad_layer_name(layer) for layer in DIRECTION_LAYERS},
     "FLOAD_DIRECTION_GUIDE",
 }
 
@@ -118,12 +119,12 @@ def read_dxf_hatches(
     for entity in doc.modelspace():
         dxftype = entity.dxftype()
         if dxftype == "HATCH":
-            if str(entity.dxf.layer).upper() in _TEMPLATE_REFERENCE_LAYERS:
+            if _is_template_reference_layer(entity.dxf.layer):
                 continue
             hatch_index += 1
             regions.extend(_regions_from_hatch(entity, tessellation_segments, min_area, hatch_index))
         elif include_closed_polylines and dxftype in {"LWPOLYLINE", "POLYLINE"}:
-            if str(entity.dxf.layer).upper() in _TEMPLATE_REFERENCE_LAYERS:
+            if _is_template_reference_layer(entity.dxf.layer):
                 continue
             region = _region_from_closed_polyline(entity, tessellation_segments, min_area)
             if region is not None:
@@ -138,10 +139,15 @@ def _read_direction_markers(msp) -> list[DirectionMarker]:
     markers: list[DirectionMarker] = []
     for entity in msp:
         layer = str(entity.dxf.layer)
-        if layer.upper() not in DIRECTION_LAYERS:
+        if not is_direction_layer(layer):
             continue
         markers.extend(_direction_markers_from_entity(entity))
     return markers
+
+
+def _is_template_reference_layer(layer: object) -> bool:
+    normalized = normalize_cad_layer_name(str(layer or ""))
+    return normalized in _TEMPLATE_REFERENCE_LAYERS or is_direction_layer(str(layer or ""))
 
 
 def _direction_markers_from_entity(entity) -> list[DirectionMarker]:
@@ -628,8 +634,9 @@ def read_load_regions(
         warnings = list(region.warnings)
         warnings.extend(validate_polygon(region.polygon, min_area=min_area))
         try:
-            if region.layer in mapping:
-                info = mapping[region.layer]
+            core_layer = strip_cad_work_layer_prefix(region.layer)
+            if region.layer in mapping or core_layer in mapping:
+                info = mapping.get(region.layer) or mapping[core_layer]
                 load = LoadLayerInfo(
                     layer=region.layer,
                     real_name=str(info.get("real_name") or info.get("name") or region.layer),
@@ -734,13 +741,30 @@ def _load_layer_mapping(path: str | Path | None) -> dict[str, dict[str, _Any]]:
     if p.suffix.lower() == ".json":
         data = _json.loads(p.read_text(encoding="utf-8"))
         if isinstance(data, list):
-            return {str(row.get("layer")): row for row in data if isinstance(row, dict) and row.get("layer")}
+            return _mapping_rows_by_layer(row for row in data if isinstance(row, dict))
         if isinstance(data, dict):
-            return {str(k): v for k, v in data.items() if isinstance(v, dict)}
+            rows = []
+            for key, value in data.items():
+                if isinstance(value, dict):
+                    row = dict(value)
+                    row.setdefault("layer", str(key))
+                    rows.append(row)
+            return _mapping_rows_by_layer(rows)
     if p.suffix.lower() == ".csv":
         with p.open("r", encoding="utf-8-sig", newline="") as f:
-            return {str(row.get("layer")): row for row in _csv.DictReader(f) if row.get("layer")}
+            return _mapping_rows_by_layer(row for row in _csv.DictReader(f) if row.get("layer"))
     return {}
+
+
+def _mapping_rows_by_layer(rows: Iterable[dict[str, _Any]]) -> dict[str, dict[str, _Any]]:
+    result: dict[str, dict[str, _Any]] = {}
+    for row in rows:
+        layer = str(row.get("layer") or "").strip()
+        core_layer = str(row.get("core_layer") or strip_cad_work_layer_prefix(layer)).strip()
+        for key in (layer, core_layer, strip_cad_work_layer_prefix(layer)):
+            if key:
+                result[key] = row
+    return result
 
 
 def _status_from_region_warnings(warnings: Sequence[str]) -> str:

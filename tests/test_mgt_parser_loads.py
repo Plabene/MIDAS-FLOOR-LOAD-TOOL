@@ -1,4 +1,5 @@
 from app.core.mgt_parser import (
+    iter_floorload_records_from_text,
     parse_floorload_type_names_from_text,
     parse_floadtype_specs_from_text,
 )

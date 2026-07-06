@@ -20,9 +20,9 @@ from app.core.mgt_parser import Element, Node, Story
 def test_normalize_hatch_scale():
     assert normalize_hatch_scale("0.01") == 0.01
     assert normalize_hatch_scale("0.02") == 0.02
-    assert normalize_hatch_scale("0") == 0.01
-    assert normalize_hatch_scale("-1") == 0.01
-    assert normalize_hatch_scale("abc") == 0.01
+    assert normalize_hatch_scale("0") == 1.0
+    assert normalize_hatch_scale("-1") == 1.0
+    assert normalize_hatch_scale("abc") == 1.0
 
 
 def test_dxf_template_contains_hatch_scale_guide(tmp_path: Path):
@@ -37,13 +37,13 @@ def test_dxf_template_contains_hatch_scale_guide(tmp_path: Path):
 
     doc = ezdxf.readfile(out)
     if doc.header.get("$HPSCALE") is not None:
-        assert abs(float(doc.header.get("$HPSCALE")) - 0.01) < 1.0e-9
+        assert abs(float(doc.header.get("$HPSCALE")) - 1.0) < 1.0e-9
     if doc.header.get("$HPNAME") is not None:
         assert str(doc.header.get("$HPNAME")).upper() == "ANSI31"
     guide_hatches = [hatch for hatch in doc.modelspace().query("HATCH") if hatch.dxf.layer == HATCH_GUIDE_LAYER]
     assert len(guide_hatches) == 1
     assert guide_hatches[0].dxf.pattern_name.upper() == "ANSI31"
-    assert abs(float(guide_hatches[0].dxf.pattern_scale) - 0.01) < 1.0e-9
+    assert abs(float(guide_hatches[0].dxf.pattern_scale) - 1.0) < 1.0e-9
 
 
 def test_hatch_scale_does_not_affect_distribution_detection(tmp_path: Path):

@@ -17,10 +17,14 @@ def test_all_story_layout_bboxes_do_not_overlap_vertically():
     layouts = plan_story_layouts(
         [Story("1F", 0.0), Story("2F", 3.0), Story("3F", 6.0)],
         [BBox2D(0.0, 0.0, 10.0, 10.0), BBox2D(-5.0, -2.0, 5.0, 8.0), BBox2D(0.0, 0.0, 20.0, 5.0)],
+        dxf_unit_scale_from_model=1000.0,
     )
 
     for upper, lower in zip(layouts, layouts[1:]):
         assert lower.placed_bbox.max_y < upper.placed_bbox.min_y
+    assert all(layout.transform.a == 1000.0 for layout in layouts)
+    assert all(layout.transform.d == 1000.0 for layout in layouts)
+    assert all(layout.label_x < layout.placed_bbox.min_x for layout in layouts)
 
 
 def test_story_layout_metadata_roundtrip_preserves_inverse_transform(tmp_path: Path):

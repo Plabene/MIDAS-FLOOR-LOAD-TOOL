@@ -46,6 +46,26 @@ class FloorLoadTypeSpec:
     ll: float = 0.0
     raw_name_line: str = ""
     raw_value_line: str = ""
+    load_case_names: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ParsedFloorLoadRecord:
+    ltname: str
+    idist: int | None
+    node_ids: tuple[int, ...]
+    fields: tuple[str, ...]
+    raw: str
+    line_number: int
+
+
+@dataclass(frozen=True)
+class ModelUnitInfo:
+    force: str = ""
+    length: str = ""
+    heat: str = ""
+    temperature: str = ""
+    source_line: str = ""
 
 
 def read_text(path: str | Path, encodings: tuple[str, ...] = ("utf-8-sig", "cp949", "euc-kr", "utf-8", "latin1")) -> str:
@@ -169,6 +189,38 @@ def parse_mgt_file(path: str | Path) -> tuple[list[Story], list[Node], list[Elem
     return parse_stories_from_text(text), parse_nodes_from_text(text), parse_elements_from_text(text), text
 
 
+def parse_unit_from_text(text: str) -> ModelUnitInfo:
+    for line in section_lines(text, "*UNIT"):
+        payload = _payload(line)
+        if not payload or payload.startswith(";") or payload.upper().startswith("*UNIT"):
+            continue
+        parts = _csv_split(payload)
+        if len(parts) >= 2:
+            return ModelUnitInfo(
+                force=parts[0].strip().upper(),
+                length=parts[1].strip().upper(),
+                heat=parts[2].strip().upper() if len(parts) > 2 else "",
+                temperature=parts[3].strip().upper() if len(parts) > 3 else "",
+                source_line=line,
+            )
+    return ModelUnitInfo()
+
+
+def dxf_unit_scale_from_model_length_unit(length_unit: str) -> float:
+    unit = str(length_unit or "").strip().upper()
+    if unit in {"M", "METER", "METERS"}:
+        return 1000.0
+    if unit in {"MM", "MILLIMETER", "MILLIMETERS"}:
+        return 1.0
+    if unit in {"CM", "CENTIMETER", "CENTIMETERS"}:
+        return 10.0
+    return 1.0
+
+
+def dxf_insunits_for_output_mm() -> int:
+    return 4
+
+
 def parse_floadtype_specs_from_text(text: str) -> list[FloorLoadTypeSpec]:
     lines = [
         line
@@ -185,11 +237,14 @@ def parse_floadtype_specs_from_text(text: str) -> list[FloorLoadTypeSpec]:
         if name:
             dl = 0.0
             ll = 0.0
+            load_case_names: list[str] = []
             value_parts = _csv_split(_payload(value_line))
             for pos in range(0, len(value_parts), 3):
                 if pos + 1 >= len(value_parts):
                     continue
                 case_name = value_parts[pos]
+                if str(case_name or "").strip():
+                    load_case_names.append(str(case_name).strip())
                 value = _try_float(value_parts[pos + 1])
                 family = _load_case_family(case_name)
                 if family == "LL":
@@ -197,7 +252,16 @@ def parse_floadtype_specs_from_text(text: str) -> list[FloorLoadTypeSpec]:
                 else:
                     # 미분류 하중은 DXF 레이어 생성을 위해 DL로 임시 분류한다.
                     dl += abs(value)
-            specs.append(FloorLoadTypeSpec(name=name, dl=dl, ll=ll, raw_name_line=name_line, raw_value_line=value_line))
+            specs.append(
+                FloorLoadTypeSpec(
+                    name=name,
+                    dl=dl,
+                    ll=ll,
+                    raw_name_line=name_line,
+                    raw_value_line=value_line,
+                    load_case_names=tuple(load_case_names),
+                )
+            )
         idx += 2
     return specs
 
@@ -205,17 +269,57 @@ def parse_floadtype_specs_from_text(text: str) -> list[FloorLoadTypeSpec]:
 def parse_floorload_type_names_from_text(text: str) -> list[str]:
     names: list[str] = []
     seen: set[str] = set()
-    for line in section_lines(text, "*FLOORLOAD"):
-        if not _is_data_line(line, "*FLOORLOAD"):
-            continue
-        parts = _csv_split(_payload(line))
-        if not parts:
-            continue
-        name = parts[0].strip().strip('"')
+    for record in iter_floorload_records_from_text(text):
+        name = record.ltname
         if name and name not in seen:
             seen.add(name)
             names.append(name)
     return names
+
+
+def parse_stldcase_names_from_text(text: str) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for line in section_lines(text, "*STLDCASE"):
+        if not _is_data_line(line, "*STLDCASE"):
+            continue
+        parts = _csv_split(_payload(line))
+        name = parts[0].strip().strip('"') if parts else ""
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+def iter_floorload_records_from_text(text: str) -> list[ParsedFloorLoadRecord]:
+    records: list[ParsedFloorLoadRecord] = []
+    for section_name, lines in split_sections(text):
+        if section_name != "*FLOORLOAD":
+            continue
+        pending: list[str] = []
+        pending_line_number = 0
+        for index, line in enumerate(lines, start=1):
+            if not _is_data_line(line, "*FLOORLOAD"):
+                continue
+            payload, continued = _floorload_payload_and_continuation(line)
+            if not payload and not continued:
+                continue
+            if not pending:
+                pending_line_number = index
+            if payload:
+                pending.append(payload)
+            if continued:
+                continue
+            record = _parsed_floorload_record_from_payload(", ".join(pending), pending_line_number)
+            if record is not None:
+                records.append(record)
+            pending = []
+            pending_line_number = 0
+        if pending:
+            record = _parsed_floorload_record_from_payload(", ".join(pending), pending_line_number)
+            if record is not None:
+                records.append(record)
+    return records
 
 
 def select_nodes_by_story(nodes: Iterable[Node], elevation: float, tolerance: float) -> list[Node]:
@@ -241,6 +345,38 @@ def representative_z(nodes: Iterable[Node]) -> float | None:
 
 def _payload(line: str) -> str:
     return line.split(";", 1)[0].strip()
+
+
+def _floorload_payload_and_continuation(line: str) -> tuple[str, bool]:
+    payload = _payload(line).rstrip()
+    continued = payload.endswith("\\")
+    if continued:
+        payload = payload[:-1].rstrip()
+        if payload.endswith(","):
+            payload = payload[:-1].rstrip()
+    return payload, continued
+
+
+def _parsed_floorload_record_from_payload(payload: str, line_number: int) -> ParsedFloorLoadRecord | None:
+    parts = _csv_split(payload)
+    if not parts:
+        return None
+    ltname = parts[0].strip().strip('"')
+    idist = _try_int(parts[1]) if len(parts) > 1 else None
+    node_start = 12 if idist in {1, 2} else 6 if idist in {3, 4} else 2
+    node_ids: list[int] = []
+    for value in parts[node_start:]:
+        node_id = _try_int(value)
+        if node_id is not None and node_id > 0:
+            node_ids.append(node_id)
+    return ParsedFloorLoadRecord(
+        ltname=ltname,
+        idist=idist,
+        node_ids=tuple(node_ids),
+        fields=tuple(parts),
+        raw=payload,
+        line_number=int(line_number),
+    )
 
 
 def _is_data_line(line: str, section_name: str) -> bool:

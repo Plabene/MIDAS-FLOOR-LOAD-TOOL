@@ -4,6 +4,10 @@ from dataclasses import dataclass
 import re
 
 
+CAD_LOAD_LAYER_PREFIX = "● "
+CAD_DIRECTION_LAYER_PREFIX = "◆ "
+
+
 @dataclass(frozen=True)
 class LoadLayerInfo:
     layer: str
@@ -21,7 +25,8 @@ class LoadLayerInfo:
 
 
 def parse_load_layer(text: str) -> LoadLayerInfo:
-    raw = str(text or "").strip()
+    raw_original = str(text or "").strip()
+    raw = strip_cad_work_layer_prefix(raw_original)
     distribution, angle = _parse_distribution_tokens(raw)
     if not raw:
         raise ValueError("레이어명이 비어 있습니다.")
@@ -47,7 +52,7 @@ def parse_load_layer(text: str) -> LoadLayerInfo:
     if not name_part:
         name_part = raw
     return LoadLayerInfo(
-        layer=raw,
+        layer=raw_original or raw,
         real_name=name_part,
         dl=dl,
         ll=ll,
@@ -62,6 +67,28 @@ def make_safe_load_layer_name(index: int, real_name: str, dl: float, ll: float, 
     name = re.sub(r"\s+", "_", name).strip("_") or "LOAD"
     layer = f"LOAD_{index:03d}_{name}_DL_{_fmt(dl)}_LL_{_fmt(ll)}"
     return layer[:max_len].rstrip("_")
+
+
+def add_cad_load_layer_prefix(layer: str) -> str:
+    value = strip_cad_work_layer_prefix(layer)
+    return value if value.startswith(CAD_LOAD_LAYER_PREFIX) else CAD_LOAD_LAYER_PREFIX + value
+
+
+def add_cad_direction_layer_prefix(layer: str) -> str:
+    value = strip_cad_work_layer_prefix(layer)
+    return value if value.startswith(CAD_DIRECTION_LAYER_PREFIX) else CAD_DIRECTION_LAYER_PREFIX + value
+
+
+def strip_cad_work_layer_prefix(layer: str) -> str:
+    value = str(layer or "").strip()
+    for prefix in (CAD_LOAD_LAYER_PREFIX, CAD_DIRECTION_LAYER_PREFIX):
+        if value.startswith(prefix):
+            return value[len(prefix) :].strip()
+    return value
+
+
+def normalize_cad_layer_name(layer: str) -> str:
+    return strip_cad_work_layer_prefix(layer).upper()
 
 
 def _fmt(value: float) -> str:
