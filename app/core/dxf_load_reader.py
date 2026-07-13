@@ -8,6 +8,7 @@ from typing import Iterable, Sequence
 import ezdxf
 from shapely.geometry import LineString, MultiPolygon, Point, Polygon
 from shapely.geometry.polygon import orient
+from shapely.ops import unary_union
 from .dxf_story_layout import (
     choose_story_layout_for_polygon,
     find_layer_mapping_path,
@@ -67,6 +68,9 @@ class HatchRegion:
     hatch_pattern_name: str = ""
     hatch_solid_fill: int = 0
     hatch_pattern_scale: float | None = None
+    layer_color: int | None = None
+    entity_color: int | None = None
+    display_color: str | None = None
     direction_markers: list[DirectionMarker] = field(default_factory=list)
     layout_metadata_used: bool = False
     layout_metadata_path: str = ""
@@ -92,6 +96,9 @@ class HatchRegion:
             "hatch_pattern_name": self.hatch_pattern_name,
             "hatch_solid_fill": self.hatch_solid_fill,
             "hatch_pattern_scale": self.hatch_pattern_scale,
+            "layer_color": self.layer_color,
+            "entity_color": self.entity_color,
+            "display_color": self.display_color,
             "direction_marker_count": len(self.direction_markers),
             "direction_marker_source_ids": [marker.source_id for marker in self.direction_markers],
             "direction_marker_match_methods": [marker.match_method for marker in self.direction_markers],
@@ -122,12 +129,16 @@ def read_dxf_hatches(
             if _is_template_reference_layer(entity.dxf.layer):
                 continue
             hatch_index += 1
-            regions.extend(_regions_from_hatch(entity, tessellation_segments, min_area, hatch_index))
+            hatch_regions = _regions_from_hatch(entity, tessellation_segments, min_area, hatch_index)
+            for region in hatch_regions:
+                _apply_color_info(region, entity, doc)
+            regions.extend(hatch_regions)
         elif include_closed_polylines and dxftype in {"LWPOLYLINE", "POLYLINE"}:
             if _is_template_reference_layer(entity.dxf.layer):
                 continue
             region = _region_from_closed_polyline(entity, tessellation_segments, min_area)
             if region is not None:
+                _apply_color_info(region, entity, doc)
                 regions.append(region)
 
     if direction_markers:
@@ -172,6 +183,7 @@ def _direction_markers_from_entity(entity) -> list[DirectionMarker]:
         points = [(float(v.dxf.location.x), float(v.dxf.location.y)) for v in entity.vertices]
     else:
         return []
+    points = _transform_entity_ocs_points(entity, points)
 
     markers: list[DirectionMarker] = []
     for index in range(len(points) - 1):
@@ -244,6 +256,7 @@ def _regions_from_hatch(entity, tessellation_segments: int, min_area: float, hat
             vertices = _vertices_from_polyline_path(path, tessellation_segments)
         elif hasattr(path, "edges"):
             vertices = _vertices_from_edge_path(path, tessellation_segments)
+        vertices = _transform_entity_ocs_points(entity, vertices)
         if len(vertices) < 3:
             warnings.append("Boundary path could not be polygonized.")
             continue
@@ -295,6 +308,7 @@ def _region_from_closed_polyline(entity, tessellation_segments: int, min_area: f
         vertices = _vertices_from_bulged_points(raw_points, tessellation_segments)
     else:
         vertices = [(float(v.dxf.location.x), float(v.dxf.location.y)) for v in entity.vertices]
+    vertices = _transform_entity_ocs_points(entity, vertices)
 
     polygons = _polygons_from_rings([_close_ring(vertices)], min_area)
     if not polygons:
@@ -312,6 +326,81 @@ def _region_from_closed_polyline(entity, tessellation_segments: int, min_area: f
         warnings=[],
         source_id=str(entity.dxf.handle),
     )
+
+
+def _apply_color_info(region: HatchRegion, entity, doc) -> None:
+    layer_color = _layer_color_index(doc, getattr(entity.dxf, "layer", ""))
+    entity_color = _entity_color_index(entity)
+    region.layer_color = layer_color
+    region.entity_color = entity_color
+    region.display_color = _display_color_for_entity(entity, entity_color, layer_color)
+
+
+def _layer_color_index(doc, layer_name: object) -> int | None:
+    try:
+        value = int(doc.layers.get(str(layer_name)).dxf.color)
+    except Exception:
+        return None
+    return value if value > 0 else None
+
+
+def _entity_color_index(entity) -> int | None:
+    try:
+        value = int(getattr(entity.dxf, "color", 256))
+    except Exception:
+        return None
+    return value if value not in {0, 256, 257} and value > 0 else None
+
+
+def _display_color_for_entity(entity, entity_color: int | None, layer_color: int | None) -> str | None:
+    true_color = _true_color_to_hex(getattr(entity.dxf, "true_color", None))
+    if true_color:
+        return true_color
+    for value in (entity_color, layer_color):
+        color = _aci_to_hex(value)
+        if color:
+            return color
+    return None
+
+
+def _true_color_to_hex(value) -> str | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    if number <= 0:
+        return None
+    return f"#{(number >> 16) & 0xFF:02x}{(number >> 8) & 0xFF:02x}{number & 0xFF:02x}"
+
+
+def _aci_to_hex(value: int | None) -> str | None:
+    if value is None:
+        return None
+    aci = int(value)
+    palette = {
+        1: "#d93025",
+        2: "#f9ab00",
+        3: "#188038",
+        4: "#1a73e8",
+        5: "#8a3ffc",
+        6: "#d01884",
+        7: "#5f6368",
+        8: "#9aa0a6",
+        9: "#202124",
+        30: "#ff7f00",
+        40: "#ffb000",
+        50: "#ffd54f",
+        70: "#9ccc65",
+        90: "#26a69a",
+        110: "#00acc1",
+        130: "#42a5f5",
+        150: "#5c6bc0",
+        170: "#7e57c2",
+        190: "#ab47bc",
+        210: "#ec407a",
+        230: "#ef5350",
+    }
+    return palette.get(aci)
 
 
 def _vertices_from_polyline_path(path, tessellation_segments: int) -> list[Point2D]:
@@ -518,6 +607,44 @@ def _xy(point) -> Point2D:
     return (float(point[0]), float(point[1]))
 
 
+def _entity_elevation_z(entity) -> float:
+    try:
+        elevation = getattr(getattr(entity, "dxf", None), "elevation", 0.0)
+    except Exception:
+        return 0.0
+    if elevation is None:
+        return 0.0
+    try:
+        if hasattr(elevation, "z"):
+            return float(elevation.z)
+        if isinstance(elevation, (tuple, list)):
+            if len(elevation) >= 3:
+                return float(elevation[2])
+            if len(elevation) == 1:
+                return float(elevation[0])
+            return 0.0
+        return float(elevation)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _transform_entity_ocs_points(entity, points: Sequence[Point2D]) -> list[Point2D]:
+    source = [(float(x), float(y)) for x, y in points]
+    try:
+        ocs = entity.ocs()
+        to_wcs = getattr(ocs, "to_wcs")
+    except Exception:
+        return source
+    elevation_z = _entity_elevation_z(entity)
+    transformed: list[Point2D] = []
+    for x, y in source:
+        try:
+            transformed.append(_xy(to_wcs((x, y, elevation_z))))
+        except Exception:
+            transformed.append((x, y))
+    return transformed
+
+
 def _close_ring(vertices: Sequence[Point2D]) -> list[Point2D]:
     ring = list(vertices)
     if ring and not _same_point(ring[0], ring[-1]):
@@ -541,6 +668,13 @@ def _same_point(a: Point2D, b: Point2D, tolerance: float = 1.0e-9) -> bool:
 def _try_float(value) -> float | None:
     try:
         return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _try_int(value) -> int | None:
+    try:
+        return int(float(value))
     except (TypeError, ValueError):
         return None
 
@@ -637,6 +771,10 @@ def read_load_regions(
             core_layer = strip_cad_work_layer_prefix(region.layer)
             if region.layer in mapping or core_layer in mapping:
                 info = mapping.get(region.layer) or mapping[core_layer]
+                aci_color = _try_int(info.get("aci_color"))
+                if aci_color is not None:
+                    region.layer_color = aci_color
+                    region.display_color = _aci_to_hex(aci_color) or region.display_color
                 load = LoadLayerInfo(
                     layer=region.layer,
                     real_name=str(info.get("real_name") or info.get("name") or region.layer),
@@ -652,7 +790,242 @@ def read_load_regions(
             status = "LOAD_PARSE_FAILED"
             warnings.append(str(exc))
         regions.append(LoadRegion(region=region, load=load, status=status, warnings=warnings))
-    return regions
+    return merge_adjacent_load_regions(regions)
+
+
+def merge_adjacent_load_regions(
+    regions: list[LoadRegion],
+    *,
+    touch_tolerance: float = 1.0e-7,
+) -> list[LoadRegion]:
+    if len(regions) <= 1:
+        return list(regions)
+
+    groups: dict[tuple, list[tuple[int, LoadRegion]]] = {}
+    passthrough: dict[int, LoadRegion] = {}
+    for index, region in enumerate(regions):
+        if not _load_region_is_mergeable(region):
+            passthrough[index] = region
+            continue
+        groups.setdefault(_load_region_merge_key(region), []).append((index, region))
+
+    replacements: dict[int, list[LoadRegion]] = dict((index, [region]) for index, region in passthrough.items())
+    skip_indices: set[int] = set()
+    merge_index = 1
+    for group in groups.values():
+        if len(group) == 1:
+            replacements[group[0][0]] = [group[0][1]]
+            continue
+        for component in _load_region_connected_components(group, touch_tolerance=touch_tolerance):
+            first_index = min(index for index, _region in component)
+            for index, _region in component:
+                if index != first_index:
+                    skip_indices.add(index)
+            if len(component) == 1:
+                replacements[first_index] = [component[0][1]]
+                continue
+            merged = _merge_load_region_component(component, merge_index=merge_index)
+            if len(merged) == 1 and merged[0] is not component[0][1]:
+                merge_index += 1
+            replacements[first_index] = merged
+
+    merged_regions: list[LoadRegion] = []
+    for index, region in enumerate(regions):
+        if index in skip_indices:
+            continue
+        merged_regions.extend(replacements.get(index, [region]))
+    return merged_regions
+
+
+def _load_region_is_mergeable(region: LoadRegion) -> bool:
+    source_type = str(getattr(region.region, "source_type", "") or "").upper()
+    return source_type in {"HATCH", "LWPOLYLINE", "POLYLINE"} and getattr(region.region, "polygon", None) is not None
+
+
+def _load_region_merge_key(region: LoadRegion) -> tuple:
+    hatch = region.region
+    load = region.load
+    return (
+        str(getattr(hatch, "story_name", "") or ""),
+        normalize_cad_layer_name(strip_cad_work_layer_prefix(str(getattr(hatch, "layer", "") or ""))),
+        str(getattr(load, "real_name", "") or "").strip(),
+        round(float(getattr(load, "dl", 0.0) if load else 0.0), 8),
+        round(float(getattr(load, "ll", 0.0) if load else 0.0), 8),
+        str(getattr(hatch, "hatch_pattern_name", "") or "").upper(),
+        int(getattr(hatch, "hatch_solid_fill", 0) or 0),
+    )
+
+
+def _load_region_connected_components(
+    group: Sequence[tuple[int, LoadRegion]],
+    *,
+    touch_tolerance: float,
+) -> list[list[tuple[int, LoadRegion]]]:
+    count = len(group)
+    adjacency = [set() for _ in range(count)]
+    for left in range(count):
+        left_polygon = group[left][1].region.polygon
+        for right in range(left + 1, count):
+            right_polygon = group[right][1].region.polygon
+            if _polygons_touch_or_overlap(left_polygon, right_polygon, touch_tolerance=touch_tolerance):
+                adjacency[left].add(right)
+                adjacency[right].add(left)
+
+    components: list[list[tuple[int, LoadRegion]]] = []
+    seen: set[int] = set()
+    for start in range(count):
+        if start in seen:
+            continue
+        stack = [start]
+        seen.add(start)
+        component_indices = []
+        while stack:
+            current = stack.pop()
+            component_indices.append(current)
+            for nxt in adjacency[current]:
+                if nxt in seen:
+                    continue
+                seen.add(nxt)
+                stack.append(nxt)
+        component_indices.sort(key=lambda value: group[value][0])
+        components.append([group[index] for index in component_indices])
+    components.sort(key=lambda component: min(index for index, _region in component))
+    return components
+
+
+def _polygons_touch_or_overlap(left: Polygon, right: Polygon, *, touch_tolerance: float) -> bool:
+    if left is None or right is None or left.is_empty or right.is_empty:
+        return False
+    if left.intersects(right) or left.touches(right) or left.overlaps(right):
+        return True
+    return left.distance(right) <= float(touch_tolerance)
+
+
+def _merge_load_region_component(
+    component: Sequence[tuple[int, LoadRegion]],
+    *,
+    merge_index: int,
+) -> list[LoadRegion]:
+    items = [region for _index, region in component]
+    if _has_conflicting_direction_markers(items):
+        return [_load_region_with_warning(item, "MERGE_SKIPPED_DIRECTION_CONFLICT") for item in items]
+    merged_geom = unary_union([item.region.polygon for item in items])
+    polygons = _polygons_from_merged_geometry(merged_geom)
+    if len(polygons) != 1:
+        return items
+    polygon = polygons[0]
+    if polygon.is_empty or polygon.area <= 1.0e-12:
+        return items
+
+    first = items[0]
+    hatch = first.region
+    vertices = [(float(x), float(y)) for x, y in list(polygon.exterior.coords)[:-1]]
+    placed_vertices, placed_bbox = _merged_component_placed_geometry(items)
+    warnings = _unique_warning_strings([warning for item in items for warning in item.warnings])
+    warnings.append(f"MERGED_ADJACENT_HATCH_REGIONS(n={len(items)})")
+    region_warnings = _unique_warning_strings([warning for item in items for warning in item.region.warnings])
+    region_warnings.append(f"MERGED_ADJACENT_HATCH_REGIONS(n={len(items)})")
+    bbox = tuple(float(value) for value in polygon.bounds)
+    story = str(getattr(hatch, "story_name", "") or "NO_STORY")
+    layer = normalize_cad_layer_name(strip_cad_work_layer_prefix(str(getattr(hatch, "layer", "") or "LAYER")))
+    merged_hatch = replace(
+        hatch,
+        vertices=vertices,
+        polygon=polygon,
+        area=float(polygon.area),
+        bbox=bbox,
+        warnings=region_warnings,
+        source_id=f"MERGED:{story}:{layer}:{merge_index}",
+        polygon_index=0,
+        direction_markers=_merged_direction_markers(items, polygon),
+        placed_vertices=placed_vertices,
+        placed_bbox=placed_bbox,
+        source_bbox=bbox,
+        model_bbox=bbox,
+    )
+    return [
+        LoadRegion(
+            region=merged_hatch,
+            load=first.load,
+            status="OK" if all(item.status == "OK" for item in items) else _status_from_region_warnings(warnings),
+            warnings=warnings,
+        )
+    ]
+
+
+def _polygons_from_merged_geometry(geometry) -> list[Polygon]:
+    if geometry is None or geometry.is_empty:
+        return []
+    if isinstance(geometry, Polygon):
+        return [orient(geometry, sign=1.0)]
+    if isinstance(geometry, MultiPolygon):
+        return [orient(part, sign=1.0) for part in geometry.geoms if not part.is_empty and part.area > 1.0e-12]
+    return []
+
+
+def _merged_component_placed_geometry(items: Sequence[LoadRegion]) -> tuple[list[Point2D], tuple[float, ...]]:
+    if not all(getattr(item.region, "placed_vertices", ()) for item in items):
+        return (list(getattr(items[0].region, "placed_vertices", ()) or ()), tuple(getattr(items[0].region, "placed_bbox", ()) or ()))
+    polygons = []
+    for item in items:
+        vertices = [(float(x), float(y)) for x, y in getattr(item.region, "placed_vertices", ()) or ()]
+        if len(vertices) >= 3:
+            polygons.append(Polygon(vertices))
+    if not polygons:
+        return ([], ())
+    merged = _polygons_from_merged_geometry(unary_union(polygons))
+    if len(merged) != 1:
+        return (list(getattr(items[0].region, "placed_vertices", ()) or ()), tuple(getattr(items[0].region, "placed_bbox", ()) or ()))
+    polygon = merged[0]
+    return (
+        [(float(x), float(y)) for x, y in list(polygon.exterior.coords)[:-1]],
+        tuple(float(value) for value in polygon.bounds),
+    )
+
+
+def _merged_direction_markers(items: Sequence[LoadRegion], polygon: Polygon) -> list[DirectionMarker]:
+    markers: list[DirectionMarker] = []
+    seen: set[tuple[str, int, Point2D, Point2D]] = set()
+    for item in items:
+        for marker in getattr(item.region, "direction_markers", ()) or ():
+            key = (str(marker.source_id or marker.handle), int(marker.segment_index or 0), marker.start, marker.end)
+            if key in seen:
+                continue
+            seen.add(key)
+            match_method = _direction_marker_match_method(marker, polygon) or marker.match_method
+            markers.append(replace(marker, match_method=match_method))
+    return markers
+
+
+def _load_region_with_warning(region: LoadRegion, warning: str) -> LoadRegion:
+    warnings = _unique_warning_strings([*region.warnings, warning])
+    hatch_warnings = _unique_warning_strings([*region.region.warnings, warning])
+    return LoadRegion(region=replace(region.region, warnings=hatch_warnings), load=region.load, status=region.status, warnings=warnings)
+
+
+def _has_conflicting_direction_markers(regions: Sequence[LoadRegion]) -> bool:
+    angles = []
+    for region in regions:
+        for marker in getattr(region.region, "direction_markers", ()) or ():
+            if marker.length <= 1.0e-12:
+                continue
+            angles.append(round(degrees(atan2(marker.end[1] - marker.start[1], marker.end[0] - marker.start[0])) % 180.0, 6))
+    if len(angles) <= 1:
+        return False
+    first = angles[0]
+    return any(min(abs(first - angle), 180.0 - abs(first - angle)) > 5.0 for angle in angles[1:])
+
+
+def _unique_warning_strings(values: Iterable[object]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
 
 
 def _region_with_story_layout(region: HatchRegion, story_layouts, metadata_path: Path | None) -> HatchRegion:
@@ -678,6 +1051,9 @@ def _region_with_story_layout(region: HatchRegion, story_layouts, metadata_path:
             hatch_solid_fill=region.hatch_solid_fill,
             hatch_pattern_scale=region.hatch_pattern_scale,
             direction_markers=region.direction_markers,
+            layer_color=region.layer_color,
+            entity_color=region.entity_color,
+            display_color=region.display_color,
             layout_metadata_used=metadata_path is not None,
             layout_metadata_path=str(metadata_path or ""),
             placed_vertices=list(region.vertices),
@@ -708,6 +1084,9 @@ def _region_with_story_layout(region: HatchRegion, story_layouts, metadata_path:
         hatch_solid_fill=region.hatch_solid_fill,
         hatch_pattern_scale=region.hatch_pattern_scale,
         direction_markers=direction_markers,
+        layer_color=region.layer_color,
+        entity_color=region.entity_color,
+        display_color=region.display_color,
         layout_metadata_used=metadata_path is not None,
         layout_metadata_path=str(metadata_path or ""),
         placed_vertices=placed_vertices,

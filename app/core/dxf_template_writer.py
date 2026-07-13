@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from statistics import median
 from typing import Iterable, Sequence
 import json
+import math
 
 import ezdxf
+from ezdxf.enums import TextEntityAlignment
 
 from .dxf_story_layout import (
     BBox2D,
+    annotate_layout_typical_metadata,
     bbox_from_points,
     normalize_dxf_unit_scale as _normalize_dxf_unit_scale,
     plan_story_layouts,
@@ -17,11 +20,34 @@ from .dxf_story_layout import (
 )
 from .load_parser import add_cad_direction_layer_prefix, add_cad_load_layer_prefix, make_safe_load_layer_name
 from .mgt_parser import Element, Node, Story, dxf_insunits_for_output_mm
+from .story_view_filter import StoryBelowRange, element_is_in_story_below_range, story_below_range
 
 
 INTERNAL_HATCH_SCALE = 1.0
 DEFAULT_HATCH_SCALE = INTERNAL_HATCH_SCALE
 HATCH_GUIDE_LAYER = "FLOAD_HATCH_GUIDE"
+CENTERLINE_BEAM_TYPES = {"BEAM", "TRUSS", "TENSTR", "COMPTR"}
+CENTERLINE_WALL_EDGE_TYPES = {"WALL", "PLATE", "SHELL", "PLANE", "PLANAR", "QUAD"}
+WALL_EDGE_LONGEST_PAIR_FALLBACK = "WALL_EDGE_LONGEST_PAIR_FALLBACK"
+LOAD_LAYER_ACI_COLORS = (
+    1,
+    2,
+    3,
+    4,
+    6,
+    30,
+    40,
+    50,
+    70,
+    90,
+    110,
+    130,
+    150,
+    170,
+    190,
+    210,
+    230,
+)
 
 
 @dataclass(frozen=True)
@@ -65,6 +91,7 @@ def write_story_centerline_dxf(
     *,
     output_path: str | Path,
     story: Story,
+    stories: Iterable[Story] | None = None,
     nodes: Iterable[Node],
     elements: Iterable[Element],
     load_layers: Iterable[LoadLayerSpec] = (),
@@ -72,6 +99,8 @@ def write_story_centerline_dxf(
     default_hatch_scale: float = DEFAULT_HATCH_SCALE,
     model_length_unit: str = "",
     dxf_unit_scale_from_model: float = 1.0,
+    typical_story_names: Iterable[str] = (),
+    typical_floor_groups: Iterable[object] = (),
 ) -> DxfTemplateResult:
     del default_hatch_scale
     out = Path(output_path)
@@ -84,9 +113,23 @@ def write_story_centerline_dxf(
     unit_scale = normalize_dxf_unit_scale(dxf_unit_scale_from_model)
     tol = abs(float(story_tolerance))
 
-    primitives, points, element_count, warnings = _story_centerline_primitives(story, node_map, element_list, tol)
-    source_bbox = bbox_from_points(points)
+    story_list = list(stories or [story])
+    story_range = story_below_range(story_list, story, tol)
+    primitives, points, element_count, warnings = _story_centerline_primitives(
+        story,
+        node_map,
+        element_list,
+        tol,
+        story_range=story_range,
+    )
+    source_bbox = bbox_from_points(_layout_points_for_story(points, node_list, story, tol))
     layouts = plan_story_layouts([story], [source_bbox], dxf_unit_scale_from_model=unit_scale)
+    layouts = _apply_typical_layout_metadata(
+        layouts,
+        typical_story_names=typical_story_names,
+        typical_floor_groups=typical_floor_groups,
+    )
+    layouts = _with_common_story_label_text_height(layouts)
 
     doc = ezdxf.new("R2010")
     _set_hatch_header_defaults(doc, default_hatch_scale=INTERNAL_HATCH_SCALE)
@@ -137,6 +180,8 @@ def write_all_story_centerline_dxf(
     default_hatch_scale: float = DEFAULT_HATCH_SCALE,
     model_length_unit: str = "",
     dxf_unit_scale_from_model: float = 1.0,
+    typical_story_names: Iterable[str] = (),
+    typical_floor_groups: Iterable[object] = (),
 ) -> DxfTemplateResult:
     del default_hatch_scale
     out = Path(output_path)
@@ -155,13 +200,26 @@ def write_all_story_centerline_dxf(
     total_elements = 0
     total_warnings = 0
     for story in story_list:
-        primitives, points, element_count, warnings = _story_centerline_primitives(story, node_map, element_list, tol)
+        story_range = story_below_range(story_list, story, tol)
+        primitives, points, element_count, warnings = _story_centerline_primitives(
+            story,
+            node_map,
+            element_list,
+            tol,
+            story_range=story_range,
+        )
         story_drawings.append((story, primitives))
-        source_bboxes.append(bbox_from_points(points))
+        source_bboxes.append(bbox_from_points(_layout_points_for_story(points, node_list, story, tol)))
         total_elements += element_count
         total_warnings += warnings
 
     layouts = plan_story_layouts(story_list, source_bboxes, dxf_unit_scale_from_model=unit_scale)
+    layouts = _apply_typical_layout_metadata(
+        layouts,
+        typical_story_names=typical_story_names,
+        typical_floor_groups=typical_floor_groups,
+    )
+    layouts = _with_common_story_label_text_height(layouts)
 
     doc = ezdxf.new("R2010")
     _set_hatch_header_defaults(doc, default_hatch_scale=INTERNAL_HATCH_SCALE)
@@ -236,10 +294,45 @@ def _save_template_outputs(
 def _draw_story_layouts(msp, story_drawings: Sequence[tuple[Story, list[tuple]]], layouts, korean_text_style: str) -> None:
     for (story, primitives), layout in zip(story_drawings, layouts):
         _draw_story_primitives(msp, primitives, layout.transform.apply)
+        label_text = f"typ. {story.name}" if bool(getattr(layout, "is_typical", False)) else story.name
         msp.add_text(
-            story.name,
+            label_text,
             dxfattribs={"layer": "STORY_LABEL", "height": layout.text_height, "style": korean_text_style},
-        ).set_placement((layout.label_x, layout.label_y))
+        ).set_placement((layout.label_x, layout.label_y), align=TextEntityAlignment.RIGHT)
+
+
+def _apply_typical_layout_metadata(
+    layouts,
+    *,
+    typical_story_names: Iterable[str] = (),
+    typical_floor_groups: Iterable[object] = (),
+):
+    group_by_story: dict[str, str] = {}
+    typical_by_group: dict[str, str] = {}
+    typical_names = [str(name) for name in typical_story_names if str(name or "").strip()]
+    for index, group in enumerate(typical_floor_groups or (), start=1):
+        group_id = str(getattr(group, "group_id", "") or f"G{index:03d}")
+        group_typical = str(getattr(group, "typical_story_name", "") or "")
+        if group_typical:
+            typical_by_group[group_id] = group_typical
+            typical_names.append(group_typical)
+        for story_name in tuple(getattr(group, "story_names", ()) or ()):
+            group_by_story[str(story_name)] = group_id
+    return annotate_layout_typical_metadata(
+        layouts,
+        typical_story_names=typical_names,
+        typical_group_by_story=group_by_story,
+        typical_story_by_group=typical_by_group,
+    )
+
+
+def _with_common_story_label_text_height(layouts):
+    layout_list = list(layouts or ())
+    heights = [float(getattr(layout, "text_height", 0.0) or 0.0) for layout in layout_list]
+    common_height = max(heights) if heights else 0.0
+    if common_height <= 0.0:
+        return layout_list
+    return [replace(layout, text_height=common_height) for layout in layout_list]
 
 
 def _ensure_layer(doc, name: str, color: int, *, plot: bool = True) -> None:
@@ -350,6 +443,7 @@ def _load_layer_mapping_rows(load_layers: list[LoadLayerSpec]) -> list[dict]:
     for index, layer_spec in enumerate(load_layers, start=1):
         spec = layer_spec.with_layer(index)
         core_layer = spec.layer
+        aci_color = load_layer_aci_color(index)
         rows.append(
             {
                 "layer": add_cad_load_layer_prefix(core_layer),
@@ -357,6 +451,7 @@ def _load_layer_mapping_rows(load_layers: list[LoadLayerSpec]) -> list[dict]:
                 "real_name": spec.real_name,
                 "DL": spec.dl,
                 "LL": spec.ll,
+                "aci_color": aci_color,
             }
         )
     if not rows:
@@ -368,14 +463,22 @@ def _load_layer_mapping_rows(load_layers: list[LoadLayerSpec]) -> list[dict]:
                 "real_name": spec.real_name,
                 "DL": spec.dl,
                 "LL": spec.ll,
+                "aci_color": load_layer_aci_color(1),
             }
         )
     return rows
 
 
+def load_layer_aci_color(index: int) -> int:
+    palette = LOAD_LAYER_ACI_COLORS
+    if not palette:
+        return 1
+    return int(palette[(max(int(index), 1) - 1) % len(palette)])
+
+
 def _write_load_layers(doc, load_layers: list[LoadLayerSpec]) -> None:
     for index, row in enumerate(_load_layer_mapping_rows(load_layers), start=1):
-        _ensure_layer(doc, str(row["layer"]), color=(index % 7) + 1)
+        _ensure_layer(doc, str(row["layer"]), color=int(row.get("aci_color") or load_layer_aci_color(index)))
 
 
 def _story_centerline_primitives(
@@ -383,7 +486,11 @@ def _story_centerline_primitives(
     node_map: dict[int, Node],
     elements: list[Element],
     tol: float,
+    *,
+    story_range: StoryBelowRange | None = None,
 ) -> tuple[list[tuple], list[tuple[float, float]], int, int]:
+    if story_range is None:
+        story_range = story_below_range([story], story, tol)
     primitives: list[tuple] = []
     points: list[tuple[float, float]] = []
     element_count = 0
@@ -392,8 +499,11 @@ def _story_centerline_primitives(
         pts = [node_map[nid] for nid in elem.node_ids if nid in node_map]
         if len(pts) < 2:
             continue
+        if not element_is_in_story_below_range(elem, node_map, story_range, tol):
+            continue
         story_pts = [p for p in pts if abs(p.z - story.elevation) <= tol]
-        if elem.elem_type in {"BEAM", "TRUSS", "TENSTR", "COMPTR"}:
+        elem_type = _normal_element_type(elem.elem_type)
+        if elem_type in CENTERLINE_BEAM_TYPES:
             if len(story_pts) >= 2:
                 line = (story_pts[0].xy, story_pts[1].xy)
                 primitives.append(("line", "CENTERLINE_BEAM", line))
@@ -404,29 +514,24 @@ def _story_centerline_primitives(
                 points.append(story_pts[0].xy)
                 element_count += 1
             continue
-        if elem.elem_type in {"COLUMN"}:
-            point = _representative_xy(story_pts or pts)
+        if elem_type in {"COLUMN"}:
+            point = _representative_xy(story_pts)
             if point:
                 primitives.append(("column", "CENTERLINE_COLUMN", point))
                 points.append(point)
                 element_count += 1
             continue
-        if elem.elem_type in {"WALL", "PLATE", "SLAB", "PLANAR"} or len(pts) >= 3:
-            if len(story_pts) >= 2:
-                xy = _unique_xy([point.xy for point in story_pts])
-                if len(xy) == 2:
-                    primitives.append(("line", "CENTERLINE_WALL", (xy[0], xy[1])))
-                    points.extend(xy)
-                    element_count += 1
-                elif len(xy) > 2:
-                    primitives.append(("polyline", "REFERENCE_GRID", xy, True))
-                    points.extend(xy)
-                    element_count += 1
-            elif len(story_pts) == 1:
-                primitives.append(("column", "CENTERLINE_COLUMN", story_pts[0].xy))
-                points.append(story_pts[0].xy)
+        if elem_type in CENTERLINE_WALL_EDGE_TYPES:
+            fallback_reasons: list[str] = []
+            edge_xy = _story_wall_edge_xy(pts, story.elevation, tol, fallback_reasons=fallback_reasons)
+            if len(edge_xy) >= 2:
+                for first, second in zip(edge_xy, edge_xy[1:]):
+                    line = (first, second)
+                    primitives.append(("line", "CENTERLINE_WALL", line))
+                    points.extend(line)
                 element_count += 1
-            else:
+                warnings += len(fallback_reasons)
+            elif not _is_horizontal_at_story(pts, story.elevation, tol):
                 warnings += 1
     return primitives, points, element_count, warnings
 
@@ -550,6 +655,115 @@ def _add_column_point_symbol(msp, xy: tuple[float, float], *, layer: str = "CENT
     msp.add_point((float(x), float(y)), dxfattribs={"layer": layer})
 
 
+def _normal_element_type(value: str) -> str:
+    return str(value or "").replace(" ", "").replace("-", "_").upper()
+
+
+def _is_horizontal_at_story(nodes: Sequence[Node], story_elevation: float, tol: float) -> bool:
+    if not nodes:
+        return False
+    story_z = float(story_elevation)
+    tolerance = max(abs(float(tol)), 1.0e-9)
+    return all(abs(float(node.z) - story_z) <= tolerance for node in nodes)
+
+
+def _story_wall_edge_xy(
+    nodes: Sequence[Node],
+    story_elevation: float,
+    tol: float,
+    *,
+    fallback_reasons: list[str] | None = None,
+) -> list[tuple[float, float]]:
+    if _is_horizontal_at_story(nodes, story_elevation, tol):
+        return []
+    story_z = float(story_elevation)
+    tolerance = max(abs(float(tol)), 1.0e-9)
+    story_nodes = [node for node in nodes if abs(float(node.z) - story_z) <= tolerance]
+    edge_nodes = _unique_nodes_by_xy(story_nodes)
+    if len(edge_nodes) <= 2:
+        return [(float(node.x), float(node.y)) for node in edge_nodes]
+
+    ordered_edge = _ordered_story_edge_node_run(nodes, story_z, tolerance)
+    if len(ordered_edge) >= 2:
+        return [(float(node.x), float(node.y)) for node in ordered_edge]
+
+    fallback = _longest_pair_nodes(edge_nodes)
+    if len(fallback) >= 2 and fallback_reasons is not None:
+        fallback_reasons.append(WALL_EDGE_LONGEST_PAIR_FALLBACK)
+    return [(float(node.x), float(node.y)) for node in fallback]
+
+
+def _unique_nodes_by_xy(nodes: Sequence[Node]) -> list[Node]:
+    result: list[Node] = []
+    seen = set()
+    for node in nodes:
+        key = (round(float(node.x), 9), round(float(node.y), 9))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(node)
+    return result
+
+
+def _ordered_story_edge_node_run(nodes: Sequence[Node], story_z: float, tolerance: float) -> list[Node]:
+    ordered_nodes = list(nodes or ())
+    count = len(ordered_nodes)
+    if count < 2:
+        return []
+    on_story = [abs(float(node.z) - story_z) <= tolerance for node in ordered_nodes]
+    if not any(on_story) or all(on_story):
+        return []
+
+    runs: list[list[int]] = []
+    current: list[int] = []
+    for index, is_on_story in enumerate(on_story):
+        if is_on_story:
+            current.append(index)
+        elif current:
+            runs.append(current)
+            current = []
+    if current:
+        runs.append(current)
+    if len(runs) > 1 and on_story[0] and on_story[-1]:
+        runs[0] = runs[-1] + runs[0]
+        runs.pop()
+
+    story_node_count = len(_unique_nodes_by_xy([node for node, is_on in zip(ordered_nodes, on_story) if is_on]))
+    best_run = max(runs, key=len, default=[])
+    best_nodes = _unique_nodes_by_xy([ordered_nodes[index] for index in best_run])
+    if len(best_nodes) >= 2 and len(best_nodes) == story_node_count:
+        return best_nodes
+    return []
+
+
+def _longest_pair_nodes(nodes: Sequence[Node]) -> list[Node]:
+    unique_nodes = _unique_nodes_by_xy(nodes)
+    if len(unique_nodes) <= 2:
+        return list(unique_nodes)
+    best_pair: tuple[Node, Node] | None = None
+    best_distance = -1.0
+    for index, first in enumerate(unique_nodes[:-1]):
+        for second in unique_nodes[index + 1:]:
+            distance = math.hypot(float(second.x) - float(first.x), float(second.y) - float(first.y))
+            if distance > best_distance:
+                best_distance = distance
+                best_pair = (first, second)
+    return list(best_pair or ())
+
+
+def _layout_points_for_story(
+    primitive_points: Sequence[tuple[float, float]],
+    nodes: Sequence[Node],
+    story: Story,
+    tol: float,
+) -> list[tuple[float, float]]:
+    if primitive_points:
+        return [(float(x), float(y)) for x, y in primitive_points]
+    story_z = float(story.elevation)
+    tolerance = max(abs(float(tol)), 1.0e-9)
+    return [(float(node.x), float(node.y)) for node in nodes if abs(float(node.z) - story_z) <= tolerance]
+
+
 def _unique_xy(points: list[tuple[float, float]], ndigits: int = 8) -> list[tuple[float, float]]:
     result: list[tuple[float, float]] = []
     seen = set()
@@ -574,10 +788,10 @@ def _fmt_float(value: float) -> str:
 
 
 def _mapping_csv(rows: list[dict]) -> str:
-    lines = ["layer,core_layer,real_name,DL,LL"]
+    lines = ["layer,core_layer,real_name,DL,LL,aci_color"]
     for row in rows:
         layer = str(row["layer"]).replace('"', '""')
         core_layer = str(row.get("core_layer") or "").replace('"', '""')
         name = str(row["real_name"]).replace('"', '""')
-        lines.append(f'"{layer}","{core_layer}","{name}",{row["DL"]},{row["LL"]}')
+        lines.append(f'"{layer}","{core_layer}","{name}",{row["DL"]},{row["LL"]},{row.get("aci_color") or ""}')
     return "\n".join(lines) + "\n"

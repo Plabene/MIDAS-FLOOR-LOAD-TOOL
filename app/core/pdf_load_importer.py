@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import csv
 import importlib
@@ -15,6 +15,57 @@ from typing import Any, Iterable, Sequence
 import yaml
 
 from .mgt_parser import read_text, section_lines, write_text
+
+
+PDF_GROUP_ACCEPTED = "ACCEPTED"
+PDF_GROUP_ACCEPTED_WITH_WARNING = "ACCEPTED_WITH_WARNING"
+PDF_GROUP_REVIEW_REQUIRED = "REVIEW_REQUIRED"
+PDF_GROUP_REJECTED = "REJECTED"
+PDF_GENERAL_NAMES = {"FLT_DL_GENERAL_", "FLT_DL_GENERAL", "LL_GENERAL", "AUTO_REVIEW", "이름 확인 필요"}
+PDF_GENERAL_NAME_KEYS = {re.sub(r"[^A-Z0-9가-힣_]", "", name.upper()) for name in PDF_GENERAL_NAMES}
+PDF_BASEMENT_REVIEW_USAGES = {
+    "저수조",
+    "소화수조 및 정화조",
+    "기계실, 발전기실",
+    "제연팬룸",
+    "기계식 주차장",
+}
+
+
+@dataclass(frozen=True)
+class PdfLoadTableGroup:
+    source_pdf: str
+    source_page: int | None
+    table_index: int | None
+    group_index: int
+    usage_name_raw: str
+    usage_name_normalized: str
+    story_scope_raw: str
+    story_names: tuple[str, ...]
+    member_scope_raw: str = ""
+    member_names: tuple[str, ...] = ()
+    detail_rows: tuple[dict[str, Any], ...] = ()
+    dead_total: float | None = None
+    live_load: float | None = None
+    service_load: float | None = None
+    factored_load: float | None = None
+    formula_type: str = "1.2DL+1.6LL"
+    unit: str = "kN/m2"
+    confidence: float = 0.0
+    warnings: tuple[str, ...] = ()
+    status: str = PDF_GROUP_REVIEW_REQUIRED
+
+
+@dataclass(frozen=True)
+class PdfSemanticScore:
+    score: float
+    usage_group_count: int
+    complete_pair_ratio: float
+    formula_pass_ratio: float
+    numeric_only_usage_ratio: float
+    fallback_name_ratio: float
+    duplicate_name_collisions: int
+    accepted_group_count: int
 
 
 @dataclass(frozen=True)
@@ -46,6 +97,8 @@ class PdfLoadImportResult:
     json_log_path: Path
     error_log_path: Path
     layer_lines: tuple[str, ...]
+    table_groups: tuple[PdfLoadTableGroup, ...] = field(default_factory=tuple)
+    semantic_score: PdfSemanticScore | None = None
 
 
 @dataclass(frozen=True)
@@ -157,10 +210,15 @@ def run_pdf_load_import(
     classified_rows = classify_loads(parsed_rows, mapping_path=mapping_path, settings_path=settings_path)
     overrides = manual_overrides_mod.load_manual_overrides(legacy_config / "manual_overrides.yml")
     classified_rows = manual_overrides_mod.apply_manual_overrides(classified_rows, overrides)
-    checked_rows, valid_rows = validators_mod.validate_rows(classified_rows)
+    checked_rows, validator_valid_rows = validators_mod.validate_rows(classified_rows)
+    table_groups = build_pdf_load_table_groups(checked_rows)
+    _annotate_rows_with_pdf_groups(checked_rows, table_groups)
+    valid_rows = filter_accepted_pdf_rows(validator_valid_rows)
+    semantic_score = score_pdf_load_semantics(table_groups)
     for row in checked_rows:
         row["mgtx_row_count"] = len(valid_rows)
-    error_rows = [row for row in checked_rows if not row.get("is_valid_for_mgtx")]
+    accepted_row_ids = {id(row) for row in valid_rows}
+    error_rows = [row for row in checked_rows if id(row) not in accepted_row_ids]
 
     generated_mgtx: Path | None = None
     if valid_rows or create_empty_mgtx:
@@ -197,13 +255,290 @@ def run_pdf_load_import(
         json_log_path=output_dir / "auto_input_log.json",
         error_log_path=output_dir / "error_log.txt",
         layer_lines=layer_lines,
+        table_groups=table_groups,
+        semantic_score=semantic_score,
     )
+
+
+_STORY_SCOPE_PATTERN = re.compile(
+    r"(?:\(\s*(?P<paren>B\s*\d+\s*F|\d+\s*F|지하\s*\d+\s*층|지상\s*\d+\s*층)\s*\)"
+    r"|(?P<bare>지하\s*\d+\s*층|지상\s*\d+\s*층|B\s*\d+\s*F))",
+    re.IGNORECASE,
+)
+
+
+def split_pdf_usage_story_scope(value: object) -> tuple[str, str, tuple[str, ...]]:
+    text = " ".join(str(value or "").replace("\r", " ").replace("\n", " ").split())
+    match = _STORY_SCOPE_PATTERN.search(text)
+    if match is None:
+        return text.strip(), "", ()
+    raw_scope = str(match.group("paren") or match.group("bare") or "").strip()
+    usage = (text[: match.start()] + " " + text[match.end() :]).strip()
+    usage = re.sub(r"\s+", " ", usage).strip(" -_,/")
+    normalized = re.sub(r"\s+", "", raw_scope.upper())
+    basement = re.fullmatch(r"지하(\d+)층", normalized)
+    above = re.fullmatch(r"지상(\d+)층", normalized)
+    b_floor = re.fullmatch(r"B(\d+)F", normalized)
+    floor = re.fullmatch(r"(\d+)F", normalized)
+    if basement:
+        story_name = f"B{int(basement.group(1))}F"
+    elif b_floor:
+        story_name = f"B{int(b_floor.group(1))}F"
+    elif above:
+        story_name = f"{int(above.group(1))}F"
+    elif floor:
+        story_name = f"{int(floor.group(1))}F"
+    else:
+        story_name = normalized
+    return usage, raw_scope, (story_name,) if story_name else ()
+
+
+def normalize_pdf_usage_name(value: object) -> tuple[str, str, tuple[str, ...]]:
+    usage, scope_raw, story_names = split_pdf_usage_story_scope(value)
+    compact = re.sub(r"[^0-9A-Z가-힣]", "", usage.upper())
+    aliases = (
+        ("기계식 주차장", ("기계식주차장", "기계식주차")),
+        ("소화수조 및 정화조", ("소화수조및정화조", "소화수조정화조")),
+        ("기계실, 발전기실", ("기계실발전기실", "기계실및발전기실")),
+        ("주차통로 및 주차장", ("주차통로및주차장", "주차통로주차장", "지하주차장")),
+        ("지붕층(태양광)", ("지붕층태양광", "태양광지붕", "태양광")),
+        ("옥탑지붕층", ("옥탑지붕층", "옥탑지붕")),
+        ("옥상조경", ("옥상조경",)),
+        ("업무시설", ("업무시설",)),
+        ("로비 및 홀", ("로비및홀", "로비홀")),
+        ("화장실", ("화장실",)),
+        ("저수조", ("저수조",)),
+        ("제연팬룸", ("제연팬룸",)),
+        ("후정", ("후정",)),
+        ("지붕층", ("지붕층", "지붕")),
+    )
+    for canonical, candidates in aliases:
+        if any(alias in compact for alias in candidates):
+            return canonical, scope_raw, story_names
+    cleaned = re.sub(r"[^0-9A-Za-z가-힣(), ]+", " ", usage)
+    cleaned = " ".join(cleaned.split()).strip(" ,")
+    return cleaned, scope_raw, story_names
+
+
+def pdf_floor_load_type_name(usage_name: str, story_names: Sequence[str]) -> str:
+    usage = str(usage_name or "").strip()
+    stories = tuple(str(name or "") for name in story_names if str(name or ""))
+    if not usage or not stories:
+        return usage
+    story = stories[0]
+    basement = re.fullmatch(r"B(\d+)F", story.upper())
+    scope = f"지하{int(basement.group(1))}층" if basement else story
+    return f"{usage}({scope})"
+
+
+def build_pdf_load_table_groups(
+    rows: Iterable[dict[str, Any]],
+    *,
+    exclude_basement_special_without_slab: bool = True,
+) -> tuple[PdfLoadTableGroup, ...]:
+    grouped: dict[tuple, list[dict[str, Any]]] = {}
+    for index, source in enumerate(rows or (), start=1):
+        row = dict(source or {})
+        raw_usage = str(
+            row.get("floor_usage_name")
+            or row.get("floor_load_type_name")
+            or row.get("usage_name_raw")
+            or ""
+        ).strip()
+        usage, scope_raw, story_names = normalize_pdf_usage_name(raw_usage)
+        row["usage_name_normalized"] = usage
+        row["story_scope_raw"] = scope_raw
+        row["story_names"] = story_names
+        row["floor_load_type_name"] = pdf_floor_load_type_name(usage, story_names) or row.get("floor_load_type_name")
+        group_marker = str(row.get("floor_load_group_key") or row.get("group_key") or f"usage:{usage}|story:{'|'.join(story_names)}")
+        key = (
+            str(row.get("source_pdf") or ""),
+            row.get("source_page"),
+            str(row.get("table_index") or str(row.get("source_index") or "").split("-", 1)[0] or ""),
+            group_marker,
+            usage,
+            story_names,
+        )
+        grouped.setdefault(key, []).append(row)
+
+    result: list[PdfLoadTableGroup] = []
+    for group_index, (key, group_rows) in enumerate(grouped.items(), start=1):
+        source_pdf, source_page, table_value, _marker, usage, story_names = key
+        usable = [row for row in group_rows if not bool(row.get("exclude_from_mgtx"))]
+        dead_values = [_pdf_row_value(row) for row in usable if _pdf_row_family(row) == "DL"]
+        live_values = [_pdf_row_value(row) for row in usable if _pdf_row_family(row) == "LL"]
+        dead_values = [value for value in dead_values if value is not None]
+        live_values = [value for value in live_values if value is not None]
+        dead_total = round(sum(dead_values), 6) if dead_values else None
+        live_load = round(sum(live_values), 6) if live_values else None
+        service_load = _first_pdf_value(group_rows, "service_load")
+        factored_load = _first_pdf_value(group_rows, "factored_load")
+        warnings = [str(item) for row in group_rows for item in tuple(row.get("warnings") or ()) if str(item)]
+        display_name = pdf_floor_load_type_name(str(usage), story_names)
+        normalized_general = re.sub(r"[^A-Z0-9가-힣_]", "", display_name.upper())
+        has_slab = any(bool(row.get("has_slab_context")) for row in group_rows)
+        is_basement_special = bool(story_names and str(story_names[0]).upper().startswith("B") and usage in PDF_BASEMENT_REVIEW_USAGES)
+        if not usage or display_name in PDF_GENERAL_NAMES or normalized_general in PDF_GENERAL_NAME_KEYS:
+            status = PDF_GROUP_REVIEW_REQUIRED
+            warnings.append("일반/fallback 이름은 자동 적용하지 않습니다.")
+        elif dead_total is None or live_load is None:
+            status = PDF_GROUP_REVIEW_REQUIRED
+            warnings.append("DL/LL pair를 모두 확정하지 못했습니다.")
+        elif exclude_basement_special_without_slab and is_basement_special and not has_slab:
+            status = PDF_GROUP_REVIEW_REQUIRED
+            warnings.append("SLAB 문맥이 없는 지하 특수실 하중은 정책상 검토 대상으로 분리합니다.")
+        elif warnings or any(bool(row.get("review_flag")) for row in group_rows):
+            status = PDF_GROUP_ACCEPTED_WITH_WARNING
+        else:
+            status = PDF_GROUP_ACCEPTED
+        confidence_values = [
+            float(row.get("confidence_score") or row.get("extraction_confidence") or row.get("ocr_confidence") or 0.0)
+            for row in group_rows
+        ]
+        confidence = sum(confidence_values) / len(confidence_values) if confidence_values else 0.0
+        try:
+            table_index = int(table_value) if str(table_value).strip() else None
+        except (TypeError, ValueError):
+            table_index = None
+        result.append(
+            PdfLoadTableGroup(
+                source_pdf=str(source_pdf),
+                source_page=int(source_page) if source_page not in (None, "") else None,
+                table_index=table_index,
+                group_index=group_index,
+                usage_name_raw=str(group_rows[0].get("floor_usage_name") or group_rows[0].get("floor_load_type_name") or ""),
+                usage_name_normalized=str(usage),
+                story_scope_raw=str(group_rows[0].get("story_scope_raw") or normalize_pdf_usage_name(group_rows[0].get("floor_usage_name") or "")[1]),
+                story_names=tuple(story_names),
+                member_scope_raw=str(group_rows[0].get("member_scope_raw") or ""),
+                member_names=tuple(str(name) for row in group_rows for name in tuple(row.get("member_names") or ()) if str(name)),
+                detail_rows=tuple(group_rows),
+                dead_total=dead_total,
+                live_load=live_load,
+                service_load=service_load,
+                factored_load=factored_load,
+                confidence=confidence,
+                warnings=tuple(dict.fromkeys(warnings)),
+                status=status,
+            )
+        )
+    return tuple(result)
+
+
+def score_pdf_load_semantics(groups: Sequence[PdfLoadTableGroup]) -> PdfSemanticScore:
+    count = len(groups)
+    if not count:
+        return PdfSemanticScore(0.0, 0, 0.0, 0.0, 1.0, 1.0, 0, 0)
+    complete = sum(1 for group in groups if group.dead_total is not None and group.live_load is not None)
+    formula_rows = [group for group in groups if group.service_load is not None or group.factored_load is not None]
+    formula_pass = 0
+    for group in formula_rows:
+        service_ok = group.service_load is None or abs(float(group.service_load) - float(group.dead_total or 0) - float(group.live_load or 0)) <= 0.08
+        factored_ok = group.factored_load is None or abs(float(group.factored_load) - (1.2 * float(group.dead_total or 0) + 1.6 * float(group.live_load or 0))) <= 0.12
+        formula_pass += int(service_ok and factored_ok)
+    numeric_only = sum(1 for group in groups if not re.search(r"[A-Za-z가-힣]", group.usage_name_normalized))
+    fallback = sum(
+        1
+        for group in groups
+        if re.sub(r"[^A-Z0-9가-힣_]", "", group.usage_name_normalized.upper()) in PDF_GENERAL_NAME_KEYS
+        or not group.usage_name_normalized
+    )
+    name_counts: dict[str, int] = {}
+    for group in groups:
+        name = pdf_floor_load_type_name(group.usage_name_normalized, group.story_names)
+        name_counts[name] = name_counts.get(name, 0) + 1
+    collisions = sum(count - 1 for count in name_counts.values() if count > 1)
+    accepted = sum(1 for group in groups if group.status in {PDF_GROUP_ACCEPTED, PDF_GROUP_ACCEPTED_WITH_WARNING})
+    complete_ratio = complete / count
+    formula_ratio = formula_pass / len(formula_rows) if formula_rows else complete_ratio
+    numeric_ratio = numeric_only / count
+    fallback_ratio = fallback / count
+    score = (
+        min(count / 6.0, 1.0) * 0.15
+        + complete_ratio * 0.35
+        + formula_ratio * 0.20
+        + (1.0 - numeric_ratio) * 0.10
+        + (1.0 - fallback_ratio) * 0.10
+        + max(0.0, 1.0 - collisions / count) * 0.05
+        + (accepted / count) * 0.05
+    )
+    return PdfSemanticScore(round(max(0.0, min(score, 1.0)), 6), count, complete_ratio, formula_ratio, numeric_ratio, fallback_ratio, collisions, accepted)
+
+
+def filter_accepted_pdf_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    accepted = []
+    for row in rows or ():
+        name = str(row.get("floor_load_type_name") or row.get("floor_load_group_key") or row.get("floor_usage_name") or "").strip()
+        normalized = re.sub(r"[^A-Z0-9가-힣_]", "", name.upper())
+        status = str(row.get("pdf_group_status") or row.get("status") or "").upper()
+        if name in PDF_GENERAL_NAMES or normalized in PDF_GENERAL_NAME_KEYS:
+            continue
+        if bool(row.get("exclude_from_mgtx")) or row.get("is_valid_for_mgtx") is False:
+            continue
+        if status and status not in {PDF_GROUP_ACCEPTED, PDF_GROUP_ACCEPTED_WITH_WARNING, "OK", "VALID"}:
+            continue
+        accepted.append(row)
+    return accepted
+
+
+def _annotate_rows_with_pdf_groups(
+    rows: Sequence[dict[str, Any]],
+    groups: Sequence[PdfLoadTableGroup],
+) -> None:
+    groups_by_key: dict[tuple, PdfLoadTableGroup] = {}
+    for group in groups:
+        key = (str(group.source_pdf), group.source_page, group.usage_name_normalized, tuple(group.story_names))
+        groups_by_key.setdefault(key, group)
+    for row in rows:
+        raw_usage = row.get("floor_usage_name") or row.get("floor_load_type_name") or ""
+        usage, scope_raw, story_names = normalize_pdf_usage_name(raw_usage)
+        key = (str(row.get("source_pdf") or ""), row.get("source_page"), usage, tuple(story_names))
+        group = groups_by_key.get(key)
+        if group is None:
+            continue
+        row["usage_name_normalized"] = usage
+        row["story_scope_raw"] = scope_raw
+        row["story_names"] = tuple(story_names)
+        row["pdf_group_status"] = group.status
+        row["pdf_group_confidence"] = group.confidence
+        display_name = pdf_floor_load_type_name(usage, story_names)
+        if display_name:
+            row["floor_usage_name"] = usage
+            row["floor_load_type_name"] = display_name
+
+
+def _pdf_row_family(row: dict[str, Any]) -> str:
+    text = str(row.get("load_case_name") or row.get("category") or row.get("forced_category") or row.get("load_component_type") or "").upper()
+    return "LL" if any(token in text for token in ("LL", "LIVE", "활", "LIVE_LOAD")) else "DL"
+
+
+def _pdf_row_value(row: dict[str, Any]) -> float | None:
+    value = row.get("floor_load_value")
+    if value is None:
+        value = row.get("load_value_kn_per_m2")
+    if value is None:
+        value = row.get("load_value")
+    try:
+        return abs(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_pdf_value(rows: Sequence[dict[str, Any]], key: str) -> float | None:
+    for row in rows:
+        value = row.get(key)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+    return None
 
 
 def extract_load_layer_lines(rows: Iterable[dict[str, Any]]) -> list[str]:
     """V3 valid_rows를 V4 DXF 레이어 입력 형식으로 변환한다."""
     grouped: dict[str, dict[str, float]] = {}
-    for row in rows or []:
+    for row in filter_accepted_pdf_rows(rows):
         name = str(row.get("floor_load_type_name") or row.get("floor_load_group_key") or row.get("floor_usage_name") or "").strip()
         if not name:
             continue

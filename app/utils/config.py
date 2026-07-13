@@ -21,7 +21,14 @@ class AppConfig:
     default_hatch_scale: float = 1.0
     snap_tolerance: float = 0.5
     area_error_limit: float = 0.25
+    continuous_projection_min_coverage: float = 0.995
+    continuous_projection_max_overreach_ratio: float = 0.005
     include_zero_load: bool = False
+    auto_load_dm_dummy_members: bool = False
+    mgt_import_capability_profile: str = "AUTO"
+    floorload_max_logical_fields: int | None = None
+    strict_post_import_verification: bool = True
+    remove_failed_model_file: bool = True
 
     @property
     def resolved_base_url(self) -> str:
@@ -48,6 +55,18 @@ def load_config() -> AppConfig:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return AppConfig()
+    mgt_import = data.get("mgt_import") if isinstance(data, dict) else None
+    if isinstance(mgt_import, dict):
+        data = dict(data)
+        aliases = {
+            "capability_profile": "mgt_import_capability_profile",
+            "floorload_max_logical_fields": "floorload_max_logical_fields",
+            "strict_post_import_verification": "strict_post_import_verification",
+            "remove_failed_model_file": "remove_failed_model_file",
+        }
+        for source_key, target_key in aliases.items():
+            if source_key in mgt_import and target_key not in data:
+                data[target_key] = mgt_import[source_key]
     defaults = asdict(AppConfig())
     defaults.update({k: v for k, v in data.items() if k in defaults})
     return AppConfig(**defaults)

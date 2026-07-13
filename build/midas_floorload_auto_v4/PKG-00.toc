@@ -1,0 +1,72 @@
+('D:\\MIDAS FLOOR LOAD '
+ 'TOOL\\build\\midas_floorload_auto_v4\\midas_floorload_auto_v4.pkg',
+ {'BINARY': True,
+  'DATA': True,
+  'EXECUTABLE': True,
+  'EXTENSION': True,
+  'PYMODULE': True,
+  'PYSOURCE': True,
+  'PYZ': False,
+  'SPLASH': True,
+  'SYMLINK': False},
+ [('pyi-contents-directory _internal', '', 'OPTION'),
+  ('PYZ-00.pyz',
+   'D:\\MIDAS FLOOR LOAD TOOL\\build\\midas_floorload_auto_v4\\PYZ-00.pyz',
+   'PYZ'),
+  ('struct',
+   'D:\\MIDAS FLOOR LOAD '
+   'TOOL\\build\\midas_floorload_auto_v4\\localpycs\\struct.pyc',
+   'PYMODULE'),
+  ('pyimod01_archive',
+   'D:\\MIDAS FLOOR LOAD '
+   'TOOL\\build\\midas_floorload_auto_v4\\localpycs\\pyimod01_archive.pyc',
+   'PYMODULE'),
+  ('pyimod02_importers',
+   'D:\\MIDAS FLOOR LOAD '
+   'TOOL\\build\\midas_floorload_auto_v4\\localpycs\\pyimod02_importers.pyc',
+   'PYMODULE'),
+  ('pyimod03_ctypes',
+   'D:\\MIDAS FLOOR LOAD '
+   'TOOL\\build\\midas_floorload_auto_v4\\localpycs\\pyimod03_ctypes.pyc',
+   'PYMODULE'),
+  ('pyimod04_pywin32',
+   'D:\\MIDAS FLOOR LOAD '
+   'TOOL\\build\\midas_floorload_auto_v4\\localpycs\\pyimod04_pywin32.pyc',
+   'PYMODULE'),
+  ('pyiboot01_bootstrap',
+   'D:\\MIDAS FLOOR LOAD '
+   'TOOL\\.venv\\Lib\\site-packages\\PyInstaller\\loader\\pyiboot01_bootstrap.py',
+   'PYSOURCE'),
+  ('pyi_rth_pkgutil',
+   'D:\\MIDAS FLOOR LOAD '
+   'TOOL\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_pkgutil.py',
+   'PYSOURCE'),
+  ('pyi_rth_multiprocessing',
+   'D:\\MIDAS FLOOR LOAD '
+   'TOOL\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_multiprocessing.py',
+   'PYSOURCE'),
+  ('pyi_rth_setuptools',
+   'D:\\MIDAS FLOOR LOAD '
+   'TOOL\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_setuptools.py',
+   'PYSOURCE'),
+  ('pyi_rth_cryptography_openssl',
+   'D:\\MIDAS FLOOR LOAD '
+   'TOOL\\.venv\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\rthooks\\pyi_rth_cryptography_openssl.py',
+   'PYSOURCE'),
+  ('pyi_rth__tkinter',
+   'D:\\MIDAS FLOOR LOAD '
+   'TOOL\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth__tkinter.py',
+   'PYSOURCE'),
+  ('pyi_rth_inspect',
+   'D:\\MIDAS FLOOR LOAD '
+   'TOOL\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_inspect.py',
+   'PYSOURCE'),
+  ('main', 'D:\\MIDAS FLOOR LOAD TOOL\\app\\main.py', 'PYSOURCE')],
+ 'python314.dll',
+ True,
+ False,
+ False,
+ [],
+ None,
+ None,
+ None)

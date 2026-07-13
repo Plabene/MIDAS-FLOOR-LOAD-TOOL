@@ -74,14 +74,19 @@ def test_story_label_text_height_still_scales_with_bbox():
     small = _compute_story_label_text_height(BBox2D(0.0, 0.0, 10.0, 10.0))
     large = _compute_story_label_text_height(BBox2D(0.0, 0.0, 100.0, 100.0))
 
+    assert small == pytest.approx(0.90)
     assert large > small
+    assert large == pytest.approx(9.0)
     assert large / small == pytest.approx(10.0, rel=0.5)
 
 
 def test_story_label_is_placed_outside_left_of_building_bbox():
     layout = plan_story_layouts([Story("1F", 0.0)], [BBox2D(10.0, 20.0, 40.0, 60.0)])[0]
+    label_gap = layout.placed_bbox.min_x - layout.label_x
+    story_short = max(min(layout.placed_bbox.width, layout.placed_bbox.height), 1.0)
 
     assert layout.label_x < layout.placed_bbox.min_x
+    assert label_gap == pytest.approx(max(layout.text_height * 1.5, story_short * 0.04))
     assert layout.label_y == pytest.approx((layout.placed_bbox.min_y + layout.placed_bbox.max_y) / 2.0)
 
 
@@ -113,23 +118,35 @@ def test_all_story_metadata_contains_scaled_label_position_and_text_height(tmp_p
     labels = {text.dxf.text: text for text in doc.modelspace().query("TEXT") if text.dxf.layer == "STORY_LABEL"}
     column_points = [entity for entity in doc.modelspace() if entity.dxf.layer == "CENTERLINE_COLUMN" and entity.dxftype() == "POINT"]
 
-    assert len(column_points) >= 2
+    assert len(column_points) >= 1
     for layout in layouts:
         label = labels[layout.story_name]
         assert float(label.dxf.height) == pytest.approx(layout.text_height)
         assert float(label.dxf.insert.x) == pytest.approx(layout.label_x)
         assert float(label.dxf.insert.y) == pytest.approx(layout.label_y)
+        assert int(label.dxf.halign) == 2
         assert layout.label_x < layout.placed_bbox.min_x
+
+
+def test_load_dm_dummy_checkbox_lives_on_dxf_tab_static():
+    source = Path("app/main.py").read_text(encoding="utf-8")
+    dxf_body = source.split("def _build_dxf_tab", 1)[1].split("def _create_scrollable_checklist", 1)[0]
+    build_body = source.split("def _build_build_tab", 1)[1].split("def _build_log_tab", 1)[0]
+
+    assert "auto_load_dm_dummy_var" in dxf_body
+    assert "LOAD DM dummy BEAM" in dxf_body
+    assert "auto_load_dm_dummy_var" not in build_body
+    assert source.count("self.auto_load_dm_dummy_var = tk.BooleanVar") == 1
 
 
 def test_column_point_change_does_not_change_centerline_coordinates_or_layout_transform(tmp_path: Path):
     out = tmp_path / "all_story_coordinates.dxf"
     result = write_all_story_centerline_dxf(
         output_path=out,
-        stories=[Story("1F", 0.0)],
+        stories=[Story("2F", 3.0)],
         nodes=[
-            Node(1, 0.0, 0.0, 0.0),
-            Node(2, 10.0, 0.0, 0.0),
+            Node(1, 0.0, 0.0, 3.0),
+            Node(2, 10.0, 0.0, 3.0),
             Node(3, 5.0, 5.0, 0.0),
             Node(4, 5.0, 5.0, 3.0),
         ],
@@ -154,12 +171,13 @@ def test_column_point_change_does_not_change_centerline_coordinates_or_layout_tr
 def _write_single_story_column_template(out: Path) -> None:
     write_story_centerline_dxf(
         output_path=out,
-        story=Story("1F", 0.0),
+        story=Story("2F", 3.0),
+        stories=[Story("1F", 0.0), Story("2F", 3.0)],
         nodes=[
             Node(1, 5.0, 5.0, 0.0),
             Node(2, 5.0, 5.0, 3.0),
-            Node(3, 0.0, 0.0, 0.0),
-            Node(4, 20.0, 0.0, 0.0),
+            Node(3, 0.0, 0.0, 3.0),
+            Node(4, 20.0, 0.0, 3.0),
         ],
         elements=[
             Element(1, "COLUMN", node_ids=(1, 2)),

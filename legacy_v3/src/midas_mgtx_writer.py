@@ -244,6 +244,9 @@ def _writer_filter_reason(row):
     role = row.get("load_value_role") or "UNKNOWN"
     case_name = row.get("load_case_name")
     name = str(row.get("floor_load_type_name") or "")
+    general_key = re.sub(r"[^A-Z0-9가-힣_]", "", name.upper())
+    if general_key in {"FLT_DL_GENERAL_", "FLT_DL_GENERAL", "LL_GENERAL", "AUTO_REVIEW", "이름확인필요"}:
+        return "일반/fallback Floor Load Type은 자동 적용하지 않음"
     if row.get("parser_type") != "BLOCK_SUMMARY_DL_LL_TABLE":
         bad_name, name_reason = is_bad_floor_load_type_name(name)
         if bad_name:
@@ -260,8 +263,8 @@ def _writer_filter_reason(row):
         return "사용하중/계수하중은 검증용 값이므로 MGTX 작성 제외"
     if name.startswith("FLT_LL_ROOF") and role == "FACTORED_LOAD":
         return "자동 생성 지붕 LL 후보가 계수하중 역할이므로 MGTX 작성 제외"
-    if name.startswith("FLT_DL_GENERAL") and row.get("review_flag"):
-        return "REVIEW 상태의 자동 DL 일반 후보이므로 MGTX 작성 제외"
+    if name.startswith("FLT_DL_GENERAL"):
+        return "자동 DL 일반 후보이므로 MGTX 작성 제외"
     value = row.get("floor_load_value")
     try:
         abs_value = abs(float(value)) if value is not None else None

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from math import hypot
 from pathlib import Path
 from statistics import median
@@ -22,6 +22,7 @@ _HATCH_BBOX_EXCLUDED_LAYERS = {
     "FLOAD_GUIDE",
     "FLOAD_HATCH_GUIDE",
     "STORY_LABEL",
+    "STORY_LABEL_TYPICAL",
     "FLOAD_DIRECTION_GUIDE",
 }
 
@@ -120,6 +121,10 @@ class StoryLayout:
     label_x: float
     label_y: float
     text_height: float
+    is_typical: bool = False
+    typical_group_id: str = ""
+    typical_story_name: str = ""
+    story_gap_after: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -177,7 +182,7 @@ def _compute_story_label_text_height(bbox: BBox2D) -> float:
 
 def _compute_story_label_text_height_from_ref(ref: float) -> float:
     base = max(float(ref), 1.0e-9)
-    return _clamp(base * 0.045, base * 0.025, base * 0.080)
+    return _clamp(base * 0.090, base * 0.050, base * 0.160)
 
 
 def _compute_point_display_size_from_ref(ref: float) -> float:
@@ -187,6 +192,21 @@ def _compute_point_display_size_from_ref(ref: float) -> float:
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:
     return max(float(minimum), min(float(value), float(maximum)))
+
+
+def _compute_legacy_story_gap(placed: BBox2D, text_height: float) -> float:
+    story_short = max(min(placed.width, placed.height), 1.0)
+    return max(placed.height * 0.25, float(text_height) * 4.0, story_short * 0.10)
+
+
+def _compute_all_story_fixed_gap(placed_bboxes: Sequence[BBox2D], text_heights: Sequence[float]) -> float:
+    gaps = [
+        _compute_legacy_story_gap(placed, text_height)
+        for placed, text_height in zip(placed_bboxes, text_heights)
+    ]
+    if not gaps:
+        return 1.0
+    return max(gaps) * 1.3
 
 
 def plan_story_layouts(
@@ -201,18 +221,22 @@ def plan_story_layouts(
         return []
 
     scale = normalize_dxf_unit_scale(dxf_unit_scale_from_model)
+    scaled_bboxes = [
+        BBox2D(bbox.min_x * scale, bbox.min_y * scale, bbox.max_x * scale, bbox.max_y * scale)
+        for bbox in source_bboxes
+    ]
+    text_heights = [_compute_story_label_text_height(bbox) for bbox in scaled_bboxes]
+    fixed_story_gap = _compute_all_story_fixed_gap(scaled_bboxes, text_heights)
     layouts: list[StoryLayout] = []
     cursor_y = 0.0
-    for index, (story, bbox) in enumerate(zip(stories, source_bboxes)):
-        scaled_bbox = BBox2D(bbox.min_x * scale, bbox.min_y * scale, bbox.max_x * scale, bbox.max_y * scale)
+    for index, (story, bbox, scaled_bbox, text_height) in enumerate(zip(stories, source_bboxes, scaled_bboxes, text_heights)):
         offset_x = -scaled_bbox.min_x
         offset_y = cursor_y - scaled_bbox.max_y
         transform = Affine2D(a=scale, d=scale, e=offset_x, f=offset_y)
         inverse = transform.inverse()
         placed = transform_bbox(bbox, transform)
-        text_height = _compute_story_label_text_height(placed)
         story_short = max(min(placed.width, placed.height), 1.0)
-        label_margin = max(text_height * 2.5, story_short * 0.03)
+        label_gap = max(text_height * 1.5, story_short * 0.04)
         story_name = str(getattr(story, "name", f"Story{index + 1}"))
         elevation = getattr(story, "elevation", None)
         layouts.append(
@@ -230,13 +254,13 @@ def plan_story_layouts(
                 insertion_y=0.0,
                 transform=transform,
                 inverse_transform=inverse,
-                label_x=placed.min_x - label_margin,
+                label_x=placed.min_x - label_gap,
                 label_y=(placed.min_y + placed.max_y) / 2.0,
                 text_height=text_height,
+                story_gap_after=fixed_story_gap,
             )
         )
-        gap = max(placed.height * 0.25, text_height * 4.0, story_short * 0.10)
-        cursor_y = placed.min_y - gap
+        cursor_y = placed.min_y - fixed_story_gap
     return layouts
 
 
@@ -269,11 +293,15 @@ def choose_story_layout_for_polygon(
     bbox_area = max(polygon_bbox.area, 1.0e-12)
     scores: list[tuple[float, float, float, StoryLayout]] = []
     for layout in layouts:
-        placed_poly = layout.placed_bbox.to_polygon()
-        overlap = polygon.intersection(placed_poly).area
-        ratio = overlap / max(polygon.area, 1.0e-12)
         point_score = 1.0 if layout.placed_bbox.contains_point(rep.x, rep.y) else 0.0
-        bbox_ratio = layout.placed_bbox.overlap_area(polygon_bbox) / bbox_area
+        bbox_overlap = layout.placed_bbox.overlap_area(polygon_bbox)
+        bbox_ratio = bbox_overlap / bbox_area
+        if bbox_overlap <= 0.0 and point_score <= 0.0:
+            ratio = 0.0
+        else:
+            placed_poly = layout.placed_bbox.to_polygon()
+            overlap = polygon.intersection(placed_poly).area
+            ratio = overlap / max(polygon.area, 1.0e-12)
         scores.append((ratio, point_score, bbox_ratio, layout))
     scores.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
 
@@ -545,7 +573,10 @@ def metadata_from_layouts(
     model_length_unit: str = "",
     dxf_unit_scale_from_model: float = 1.0,
 ) -> dict:
+    layout_list = tuple(layouts)
     scale = normalize_dxf_unit_scale(dxf_unit_scale_from_model)
+    story_gaps = [float(layout.story_gap_after) for layout in layout_list if float(layout.story_gap_after) > 0.0]
+    text_heights = [float(layout.text_height) for layout in layout_list if float(layout.text_height) > 0.0]
     return {
         "version": 2,
         "mode": str(mode or "ALL_STORIES"),
@@ -554,8 +585,41 @@ def metadata_from_layouts(
         "dxf_display_unit": "MM",
         "dxf_unit_scale_from_model": scale,
         "model_unit_scale_from_dxf": 1.0 / scale,
-        "stories": [_layout_to_dict(layout) for layout in layouts],
+        "story_gap": max(story_gaps) if story_gaps else 0.0,
+        "story_label_text_height_common": max(text_heights) if text_heights else 0.0,
+        "stories": [_layout_to_dict(layout) for layout in layout_list],
     }
+
+
+def annotate_layout_typical_metadata(
+    layouts: Sequence[StoryLayout],
+    *,
+    typical_story_names: Iterable[str] = (),
+    typical_group_by_story: dict[str, str] | None = None,
+    typical_story_by_group: dict[str, str] | None = None,
+) -> list[StoryLayout]:
+    typical_names = {_normalize_story_label(name) for name in typical_story_names}
+    group_by_story = {
+        _normalize_story_label(name): str(group_id)
+        for name, group_id in (typical_group_by_story or {}).items()
+        if str(name or "").strip()
+    }
+    typical_by_group = {str(group_id): str(story_name) for group_id, story_name in (typical_story_by_group or {}).items()}
+    result: list[StoryLayout] = []
+    for layout in layouts:
+        story_key = _normalize_story_label(layout.story_name)
+        group_id = group_by_story.get(story_key, "")
+        group_typical_story = typical_by_group.get(group_id, "") if group_id else ""
+        is_typical = story_key in typical_names or (group_typical_story and _normalize_story_label(group_typical_story) == story_key)
+        result.append(
+            replace(
+                layout,
+                is_typical=bool(is_typical),
+                typical_group_id=group_id,
+                typical_story_name=group_typical_story if group_typical_story else (layout.story_name if is_typical else ""),
+            )
+        )
+    return result
 
 
 def layouts_from_metadata(data: dict) -> list[StoryLayout]:
@@ -820,7 +884,7 @@ def _xy(point) -> tuple[float, float]:
 
 
 def _looks_like_story_label(text: str) -> bool:
-    compact = "".join(str(text or "").split())
+    compact = _normalize_story_label(text)
     if not compact:
         return False
     if len(compact) > 32:
@@ -837,7 +901,13 @@ def _entity_text(entity) -> str:
 
 
 def _normalize_story_label(value: object) -> str:
-    return "".join(str(value or "").split()).upper()
+    compact = "".join(str(value or "").split()).upper()
+    for prefix in ("TYP.", "TYPICAL."):
+        if compact.startswith(prefix):
+            return compact[len(prefix) :]
+    if compact.startswith("TYPICAL"):
+        return compact[len("TYPICAL") :]
+    return compact
 
 
 def _bbox_from_bounds(bounds) -> BBox2D:
@@ -860,6 +930,10 @@ def _layout_to_dict(layout: StoryLayout) -> dict:
         "inverse_transform": asdict(layout.inverse_transform),
         "label_position": {"x": layout.label_x, "y": layout.label_y},
         "text_height": layout.text_height,
+        "is_typical": bool(layout.is_typical),
+        "typical_group_id": layout.typical_group_id,
+        "typical_story_name": layout.typical_story_name,
+        "story_gap_after": layout.story_gap_after,
     }
     return data
 
@@ -887,6 +961,10 @@ def _layout_from_dict(data: dict) -> StoryLayout:
         label_x=float(label.get("x", 0.0)),
         label_y=float(label.get("y", 0.0)),
         text_height=float(data.get("text_height", 0.25)),
+        is_typical=bool(data.get("is_typical", False)),
+        typical_group_id=str(data.get("typical_group_id") or ""),
+        typical_story_name=str(data.get("typical_story_name") or ""),
+        story_gap_after=float(data.get("story_gap_after", 0.0)),
     )
 
 

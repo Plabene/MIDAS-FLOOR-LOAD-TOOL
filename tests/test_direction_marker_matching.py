@@ -33,12 +33,10 @@ def test_long_direction_line_crossing_multiple_hatches_matches_all(tmp_path: Pat
 
     regions = read_load_regions(dxf)
 
-    assert len(regions) == 3
-    assert all(len(region.region.direction_markers) == 1 for region in regions)
-    assert {region.region.direction_markers[0].source_id for region in regions} == {
-        regions[0].region.direction_markers[0].source_id
-    }
-    assert {region.region.direction_markers[0].match_method for region in regions} == {"INTERSECT", "MIDPOINT_INSIDE"}
+    assert len(regions) == 1
+    assert regions[0].region.source_id.startswith("MERGED:")
+    assert len(regions[0].region.direction_markers) == 1
+    assert regions[0].region.direction_markers[0].match_method == "MIDPOINT_INSIDE"
 
 
 def test_parallel_outside_direction_line_does_not_match_by_default():

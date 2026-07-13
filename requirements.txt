@@ -13,4 +13,5 @@ pytesseract>=0.3
 opencv-python>=4.8
 streamlit>=1.36
 pyinstaller>=6.0
+pyinstaller-hooks-contrib>=2024.0
 pytest>=8.0

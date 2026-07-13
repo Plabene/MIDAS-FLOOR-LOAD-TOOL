@@ -41,6 +41,7 @@ DEFAULT_OCR_SETTINGS = {
     "engine": "tesseract",
     "engine_priority": ["tesseract", "paddleocr", "easyocr"],
     "min_text_length_for_text_pdf": 50,
+    "min_text_semantic_score": 0.55,
     "min_ocr_confidence": 60,
     "include_review_required": False,
     "screening": {
@@ -405,13 +406,23 @@ def _merge_header_rows(previous_header, current_header):
 def _extract_from_text_layer(pdf_file, page_index, page, page_info):
     rows = []
     text_meta = _page_meta(page_info, method="text_layer", confidence=page_info.get("extraction_confidence"))
-    try:
-        tables = page.extract_tables() or []
-    except Exception as exc:
-        rows.append(_error_candidate(pdf_file, page_index, f"Table extraction failed: {exc}", extra=text_meta))
-        tables = []
+    # Use deterministic structural strategies before pdfplumber's generic table
+    # guess.  The text strategy is the bbox/x-column assignment fallback.
+    table_variants = []
+    strategies = (
+        ("ruled_lines", {"vertical_strategy": "lines", "horizontal_strategy": "lines", "snap_tolerance": 4, "join_tolerance": 4}),
+        ("word_columns", {"vertical_strategy": "text", "horizontal_strategy": "text", "min_words_vertical": 2, "min_words_horizontal": 1}),
+        ("pdfplumber_default", None),
+    )
+    for strategy_name, table_settings in strategies:
+        try:
+            extracted = page.extract_tables(table_settings=table_settings) if table_settings else page.extract_tables()
+            table_variants.extend((strategy_name, table) for table in (extracted or []))
+        except Exception as exc:
+            if strategy_name == "pdfplumber_default":
+                rows.append(_error_candidate(pdf_file, page_index, f"Table extraction failed: {exc}", extra=text_meta))
 
-    for table_index, table in enumerate(tables, start=1):
+    for table_index, (strategy_name, table) in enumerate(table_variants, start=1):
         active_header = []
         previous_header = []
         active_floor_usage = ""
@@ -432,7 +443,10 @@ def _extract_from_text_layer(pdf_file, page_index, page, page_info):
             if _contains_any(raw_text, LOAD_KEYWORDS) or (active_header and any(char.isdigit() for char in raw_text)):
                 rows.append(_make_candidate(
                     pdf_file, page_index, "table", f"{table_index}-{row_index}", raw_text,
-                    cells=cells, header=active_header, floor_usage=active_floor_usage, extra=text_meta,
+                    cells=cells,
+                    header=active_header,
+                    floor_usage=active_floor_usage,
+                    extra={**text_meta, "table_extraction_strategy": strategy_name},
                 ))
 
     try:
@@ -481,6 +495,49 @@ def _has_value_rows(rows):
         or row.get("load_value") is not None
         for row in rows or []
     )
+
+
+def _candidate_semantic_score(rows):
+    """Cheap pre-parser quality gate used to decide whether text still needs OCR."""
+
+    usable = [row for row in (rows or []) if row.get("source_type") != "error"]
+    if not usable:
+        return 0.0
+    groups = {}
+    numeric_rows = 0
+    formula_rows = 0
+    fallback_rows = 0
+    numeric_usage = 0
+    for row in usable:
+        raw = str(row.get("raw_text") or "")
+        usage = str(row.get("floor_usage_name") or "").strip()
+        key = str(row.get("floor_load_group_key") or usage or row.get("source_index") or "")
+        groups.setdefault(key, []).append(row)
+        numbers = re.findall(r"(?<![A-Za-z])[-+]?\d+(?:\.\d+)?", raw)
+        numeric_rows += int(bool(numbers))
+        formula_rows += int(bool(re.search(r"1\s*[.]?\s*2.*(?:DL|D[.]L).*1\s*[.]?\s*6.*(?:LL|L[.]L)", raw, re.IGNORECASE)))
+        compact_usage = re.sub(r"\s+", "", usage.upper())
+        fallback_rows += int(not usage or any(token in compact_usage for token in ("GENERAL", "REVIEW", "UNKNOWN", "이름확인")))
+        numeric_usage += int(bool(usage) and not bool(re.search(r"[A-Za-z가-힣]", usage)))
+    group_count = len(groups)
+    semantic_groups = sum(
+        1
+        for group in groups.values()
+        if any(re.search(r"(?:DL|D[.]L|고정|사하중)", str(row.get("raw_text") or ""), re.IGNORECASE) for row in group)
+        and any(re.search(r"(?:LL|L[.]L|활하중|적재)", str(row.get("raw_text") or ""), re.IGNORECASE) for row in group)
+    )
+    pair_ratio = semantic_groups / group_count if group_count else 0.0
+    usage_ratio = sum(bool(str(row.get("floor_usage_name") or "").strip()) for row in usable) / len(usable)
+    score = (
+        min(group_count / 3.0, 1.0) * 0.15
+        + numeric_rows / len(usable) * 0.25
+        + usage_ratio * 0.20
+        + pair_ratio * 0.20
+        + (1.0 - fallback_rows / len(usable)) * 0.10
+        + (1.0 - numeric_usage / len(usable)) * 0.05
+        + min(formula_rows, 1) * 0.05
+    )
+    return round(max(0.0, min(score, 1.0)), 6)
 
 
 def _merge_ocr_line_fallback(rows, fallback_rows, meta):
@@ -727,12 +784,23 @@ def extract_pdf_load_candidates(input_dir):
                         if text_rows:
                             page_rows.extend(text_rows)
 
-                    text_rows_sufficient = bool(text_rows) and bool(page_info.get("text_extraction_available")) and page_info.get("extracted_text_length", 0) >= int(ocr_settings.get("min_text_length_for_text_pdf", 50))
+                    text_semantic_score = _candidate_semantic_score(text_rows)
+                    semantic_threshold = float(ocr_settings.get("min_text_semantic_score", 0.55))
+                    text_rows_sufficient = (
+                        bool(text_rows)
+                        and bool(page_info.get("text_extraction_available"))
+                        and page_info.get("extracted_text_length", 0) >= int(ocr_settings.get("min_text_length_for_text_pdf", 50))
+                        and text_semantic_score >= semantic_threshold
+                    )
                     ocr_diagnostics = []
                     if not text_rows_sufficient:
                         if ocr_settings.get("enabled", True):
                             ocr_rows, ocr_diagnostics = _extract_from_ocr_fallback(pdf_file, page_index, page_info, ocr_settings, debug_root)
-                            page_rows.extend(ocr_rows)
+                            ocr_semantic_score = _candidate_semantic_score(ocr_rows)
+                            if text_rows and text_semantic_score >= ocr_semantic_score:
+                                page_rows = list(text_rows)
+                            elif ocr_rows:
+                                page_rows = list(ocr_rows)
                         else:
                             page_rows.append(_error_candidate(
                                 pdf_file,
@@ -758,6 +826,10 @@ def extract_pdf_load_candidates(input_dir):
                     page_diag["render_dpi"] = max([item.get("dpi") or 0 for item in ocr_diagnostics] or [None])
                     page_diag["ocr_available"] = any((item.get("ocr_confidence") or 0) > 0 for item in ocr_diagnostics)
                     page_diag["ocr_diagnostics"] = ocr_diagnostics
+                    page_diag["text_semantic_score"] = text_semantic_score
+                    page_diag["semantic_threshold"] = semantic_threshold
+                    page_diag["semantic_fallback_triggered"] = not text_rows_sufficient
+                    page_diag["selected_semantic_score"] = _candidate_semantic_score(page_rows)
                     page_diagnostics.append(page_diag)
         except Exception as exc:
             candidates.append(_error_candidate(pdf_file, None, f"PDF open failed: {exc}"))

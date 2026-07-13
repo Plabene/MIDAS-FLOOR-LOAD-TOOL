@@ -13,6 +13,11 @@ DETAIL_NAME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 NOISE_PATTERN = re.compile(r"[^\w가-힣() ]+", re.UNICODE)
+STORY_SCOPE_PATTERN = re.compile(
+    r"\(\s*(?P<paren>B\s*\d+\s*F|\d+\s*F|지하\s*\d+\s*층|지상\s*\d+\s*층)\s*\)"
+    r"|(?P<bare>지하\s*\d+\s*층|지상\s*\d+\s*층|B\s*\d+\s*F)",
+    re.IGNORECASE,
+)
 
 
 def load_name_normalization(config_dir=None):
@@ -37,13 +42,51 @@ def _compact(value):
     return normalize_keyword_text(value)
 
 
+def split_floor_usage_story_scope(value):
+    text = " ".join(str(value or "").replace("\r", " ").replace("\n", " ").split())
+    match = STORY_SCOPE_PATTERN.search(text)
+    if not match:
+        return text, "", ""
+    raw = str(match.group("paren") or match.group("bare") or "").strip()
+    usage = (text[:match.start()] + " " + text[match.end():]).strip()
+    usage = re.sub(r"\s+", " ", usage).strip(" -_,/")
+    compact = re.sub(r"\s+", "", raw.upper())
+    basement = re.fullmatch(r"지하(\d+)층", compact)
+    above = re.fullmatch(r"지상(\d+)층", compact)
+    b_floor = re.fullmatch(r"B(\d+)F", compact)
+    floor = re.fullmatch(r"(\d+)F", compact)
+    if basement:
+        normalized = f"B{int(basement.group(1))}F"
+    elif b_floor:
+        normalized = f"B{int(b_floor.group(1))}F"
+    elif above:
+        normalized = f"{int(above.group(1))}F"
+    elif floor:
+        normalized = f"{int(floor.group(1))}F"
+    else:
+        normalized = compact
+    return usage, raw, normalized
+
+
+def _with_story_scope(name, story_scope):
+    base, _raw, configured_scope = split_floor_usage_story_scope(name)
+    scope = story_scope or configured_scope
+    if not scope:
+        return base
+    match = re.fullmatch(r"B(\d+)F", scope.upper())
+    display = f"지하{int(match.group(1))}층" if match else scope.upper()
+    return f"{base}({display})"
+
+
 def normalize_floor_usage_name(value, mapping=None):
     text = " ".join(str(value or "").replace("\r", " ").replace("\n", " ").split())
     if not text:
         return "", "EMPTY"
 
+    usage_text, _story_scope_raw, story_scope = split_floor_usage_story_scope(text)
+
     mapping = mapping or load_name_normalization()
-    compact_text = _compact(text)
+    compact_text = _compact(usage_text)
     best = None
     for canonical, aliases in mapping.items():
         candidates = [canonical, *(aliases or [])]
@@ -54,19 +97,19 @@ def normalize_floor_usage_name(value, mapping=None):
                 if best is None or score > best[0]:
                     best = (score, canonical, alias)
     if best:
-        return best[1], f"alias:{best[2]}"
+        return _with_story_scope(best[1], story_scope), f"alias:{best[2]}"
 
-    number_count = len(re.findall(r"\d+(?:\.\d+)?", text))
-    detail_hits = DETAIL_NAME_PATTERN.findall(text)
+    number_count = len(re.findall(r"\d+(?:\.\d+)?", usage_text))
+    detail_hits = DETAIL_NAME_PATTERN.findall(usage_text)
     if number_count >= 2 or len(detail_hits) >= 2:
         return "", "DETAIL_OR_NUMERIC_NAME"
 
-    cleaned = NOISE_PATTERN.sub(" ", text)
+    cleaned = NOISE_PATTERN.sub(" ", usage_text)
     cleaned = DETAIL_NAME_PATTERN.sub(" ", cleaned)
     cleaned = " ".join(cleaned.split())
     if not cleaned or len(cleaned) < 2:
         return "", "LOW_CONFIDENCE_NAME"
-    return cleaned[:40], "cleaned"
+    return _with_story_scope(cleaned[:40], story_scope), "cleaned"
 
 
 def is_bad_floor_load_type_name(value):

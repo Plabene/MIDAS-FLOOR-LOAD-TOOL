@@ -83,7 +83,10 @@ def test_mark_dxf_generated_success_enables_open_button(tmp_path: Path):
     assert app.open_generated_dxf_button["state"] == "normal"
     assert app.open_generated_dxf_button["text"].startswith("생성 DXF 파일 열기")
     assert app.open_generated_dxf_button["background"] == main_mod.DXF_NEXT_ACTION_BG
-    assert "다음 단계" in app.dxf_next_action_text_var.get()
+    message = app.dxf_next_action_text_var.get()
+    assert "DXF" in message
+    assert "4" in message
+    assert "직접" in message
 
 
 def test_mark_dxf_generated_failed_disables_open_button(tmp_path: Path):

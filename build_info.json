@@ -1,0 +1,10 @@
+{
+  "version": "v4",
+  "build_timestamp": "2026-07-13T17:01:58+09:00",
+  "git_commit": "00bf17709fbd",
+  "git_dirty": true,
+  "source_hash": "201426d8034bfa00",
+  "exe_name": "midas_floorload_auto_v4.exe",
+  "exe_timestamp": "2026-07-13T17:01:49+09:00",
+  "exe_sha256": "b04eea00c804756e828b23618cb482128602f2e482eff506b2d4fcd07c9da173"
+}
